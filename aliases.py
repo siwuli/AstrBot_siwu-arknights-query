@@ -19,6 +19,30 @@ ALIAS_FILE = os.path.join(get_astrbot_data_path(), "arknights_query", "aliases.j
 
 VALID_KINDS = ("operator", "enemy")
 
+# 默认代号表（社区公认高频外号）。首次加载或文件缺失时写入；
+# 已有文件时也会合并（只补缺，不覆盖用户/Agent 已登记的内容）。
+DEFAULT_ALIASES = {
+    "operator": {
+        "大哥": "重岳",
+        "二哥": "望",
+        "臭棋篓子": "望",
+        "银老板": "银灰",
+        "小羊": "艾雅法拉",
+        "42姐": "史尔特尔",
+        "蒂蒂": "斯卡蒂",
+        "拉狗": "拉普兰德",
+        "德狗": "德克萨斯",
+        "煌猫猫": "煌",
+        "洁哥": "安洁莉娜",
+        "杰哥": "安洁莉娜",
+        "白咕咕": "白面鸮",
+        "驴": "阿米娅",
+    },
+    "enemy": {
+        "大爹": "爱国者",
+    },
+}
+
 _lock = threading.Lock()
 _cache = None  # {"operator": {alias: name}, "enemy": {alias: name}}
 
@@ -28,7 +52,7 @@ def _empty():
 
 
 def _load() -> dict:
-    """加载别名表（带缓存）。"""
+    """加载别名表（带缓存），并在加载时合并默认代号。"""
     global _cache
     if _cache is not None:
         return _cache
@@ -43,7 +67,16 @@ def _load() -> dict:
                     data[kind] = {str(k): str(v) for k, v in table.items() if str(k)}
         except Exception as e:
             logger.warning(f"别名文件解析失败，将重建: {e}")
+    # 合并默认代号（只补缺，不覆盖已有记录）
+    changed = False
+    for kind, table in DEFAULT_ALIASES.items():
+        for alias, name in table.items():
+            if alias not in data[kind]:
+                data[kind][alias] = name
+                changed = True
     _cache = data
+    if changed:
+        _save()
     return data
 
 
