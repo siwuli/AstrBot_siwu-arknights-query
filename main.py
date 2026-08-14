@@ -25,6 +25,7 @@ from astrbot.api.all import (
 from astrbot.api.event import filter
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
+from . import aliases as akq_aliases
 from . import gamedata
 from . import query as akq_query
 from . import render as akq_render
@@ -141,7 +142,9 @@ class ArknightsQuery(star.Star):
         name = akq_query.search_operator(operator_name)
         if not name:
             yield event.make_result().message(
-                f"博士，没有找到干员「{operator_name}」的资料，请确认名称是否正确～"
+                f"未找到干员「{operator_name}」。这可能是社区代号/外号，本地数据与代号记录中均无此名。"
+                "可联网搜索确认其对应的干员规范名，然后调用 arknights_query_alias 登记（如 夏游洁 → 予愿安洁莉），"
+                "登记后即可正常查询；若用户反馈不对，请用 arknights_query_alias 更新记录。"
             )
             return
 
@@ -226,7 +229,9 @@ class ArknightsQuery(star.Star):
         name = akq_query.search_enemy(enemy_name)
         if not name:
             yield event.make_result().message(
-                f"博士，没有找到敌方单位「{enemy_name}」的资料，请确认名称是否正确～"
+                f"未找到敌方单位「{enemy_name}」。这可能是社区代号/外号，本地数据与代号记录中均无此名。"
+                "可联网搜索确认其对应的规范名，然后调用 arknights_query_alias 登记；"
+                "登记后即可正常查询；若用户反馈不对，请用 arknights_query_alias 更新记录。"
             )
             return
 
@@ -242,6 +247,65 @@ class ArknightsQuery(star.Star):
         except Exception as e:
             logger.exception(f"敌方单位查询渲染失败: {e}")
             yield event.make_result().message(f"博士，查询敌方单位「{name}」时出错了：{e}")
+
+    @llm_tool(name="arknights_query_alias")
+    async def manage_alias(self, event: AstrMessageEvent, action: str, kind: str, alias: str, name: str = ""):
+        """管理干员/敌方单位的代号（别名）记录。用户查询时经常使用社区外号/谐音（如 夏游洁 指 予愿安洁莉），查询工具会自动先用别名记录解析输入。当查询工具返回「未找到」、而你能通过联网搜索或对话上下文确认用户指的是哪个干员/敌人时，用本工具登记代号，登记后后续查询可直接命中；也可查询已登记的别名或删除错误记录。
+
+        Args:
+            action(string): 操作类型，可选 query(查询已登记的别名)/register(登记别名)/remove(删除别名)
+            kind(string): 类别，可选 operator(干员)/enemy(敌方单位)
+            alias(string): 用户使用的代号，如 夏游洁
+            name(string): 对应的规范名称，仅 register 时必填，如 予愿安洁莉
+        """
+        action = (action or "").strip().lower()
+        kind = (kind or "").strip().lower()
+        alias = (alias or "").strip()
+
+        if not bool(self.config.get("akq_enabled", True)):
+            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
+            return
+
+        if action == "register":
+            if not name:
+                yield event.make_result().message("登记代号需要提供规范名称（name），如：夏游洁 → 予愿安洁莉娜。")
+                return
+            # 校验并规范化为搜索命中的规范名，避免登记非规范名
+            canonical = None
+            if kind == "operator":
+                canonical = akq_query.search_operator(name)
+            elif kind == "enemy":
+                canonical = akq_query.search_enemy(name)
+            if not canonical:
+                yield event.make_result().message(
+                    f"登记失败：{kind} 类中找不到与「{name}」对应的干员/敌人，请确认名称正确（可用联网搜索确认官方名称）。"
+                )
+                return
+            if akq_aliases.register(kind, alias, canonical):
+                yield event.make_result().message(
+                    f"已登记代号：{kind}「{alias}」→「{canonical}」。以后直接查询「{alias}」即可命中。"
+                )
+            else:
+                yield event.make_result().message("登记失败：kind 需为 operator 或 enemy。")
+        elif action == "remove":
+            if akq_aliases.remove(kind, alias):
+                yield event.make_result().message(f"已删除代号「{alias}」。")
+            else:
+                yield event.make_result().message(f"代号「{alias}」不存在，无需删除。")
+        elif action == "query":
+            table = akq_aliases.all_aliases(kind if kind in ("operator", "enemy") else None)
+            if not any(table.values()):
+                yield event.make_result().message("暂无已登记的代号记录。")
+                return
+            lines = []
+            for k in ("operator", "enemy"):
+                if table.get(k):
+                    lines.append(f"{k}：")
+                    for a, n in table[k].items():
+                        lines.append(f"  {a} → {n}")
+            yield event.make_result().message("\n".join(lines))
+        else:
+            yield event.make_result().message("未知操作，action 可选 query / register / remove。")
 
     # ------------------------------------------------------------------
     # 命令回退（需 @ 或唤醒词）

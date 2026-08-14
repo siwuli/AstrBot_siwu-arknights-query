@@ -6,6 +6,7 @@
 
 import re
 
+from . import aliases as akq_aliases
 from .gamedata import GameData, get_skin_file
 from .utils import find_most_similar, integer, remove_punctuation, snake_case_to_pascal_case
 
@@ -14,10 +15,16 @@ from .utils import find_most_similar, integer, remove_punctuation, snake_case_to
 # 干员
 # ---------------------------------------------------------------------------
 def search_operator(text: str):
-    """干员名匹配：精确 → 英文名 → 包含 → 相似。返回规范名称或 None。"""
+    """干员名匹配：代号记录 → 精确 → 英文名 → 包含 → 相似。返回规范名称或 None。"""
     text = (text or "").strip()
     if not text:
         return None
+
+    # 先查历史代号记录（如 夏游洁 -> 予愿安洁莉）
+    resolved = akq_aliases.resolve("operator", text)
+    if resolved:
+        return resolved
+
     if text in GameData.operators:
         return text
 
@@ -219,10 +226,16 @@ def get_enemy(name: str, get_links: bool = True):
 
 
 def search_enemy(text: str):
-    """敌方名匹配：精确 → 索引号 → 相似度。返回规范名称或 None。"""
+    """敌方名匹配：代号记录 → 精确 → 索引号 → 相似度。返回规范名称或 None。"""
     text = (text or "").strip()
     if not text:
         return None
+
+    # 先查历史代号记录
+    resolved = akq_aliases.resolve("enemy", text)
+    if resolved:
+        return resolved
+
     if text in GameData.enemies:
         return text
 
