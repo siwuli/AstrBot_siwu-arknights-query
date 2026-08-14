@@ -68,7 +68,7 @@ QUERY_TYPE_HINT = {
 
 # 查询意图关键词（Agent 强制工具调用钩子使用）：命中则认为用户在请求明日方舟数据查询。
 QUERY_INTENT_RE = re.compile(
-    r"查|查询|专精|技能|召唤物|材料|干员|敌人|敌方|怎么打|哪里刷|数据|资料|属性|关卡|地图|术语|地形|活动|突袭|磨难|公招|招募",
+    r"查|查询|专精|技能|召唤物|材料|干员|敌人|敌方|怎么打|哪里刷|数据|资料|属性|关卡|地图|术语|地形|活动|突袭|磨难|公招|招募|词条",
     re.I,
 )
 
@@ -588,10 +588,9 @@ class ArknightsQuery(star.Star):
                 for sub in sub_chain:
                     yield from _iter_images(sub)
 
-        # event.message 是 MessageChain（组件存在 .chain），需取其组件列表遍历
-        msg_chain = getattr(event.message, "chain", None)
-        if msg_chain is None:
-            msg_chain = event.message
+        # 组件列表：AstrBot 4.27.x 的 event.get_messages() 返回
+        # list[BaseMessageComponent]（= message_obj.message），event.message 不存在
+        msg_chain = event.get_messages()
         for comp in msg_chain:
             image_comp = next(_iter_images(comp), None)
             if image_comp is not None:
