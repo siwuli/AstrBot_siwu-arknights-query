@@ -141,10 +141,8 @@ class ArknightsQuery(star.Star):
     async def query_operator(self, event: AstrMessageEvent, operator_name: str, query_type: str = "info"):
         """查询明日方舟干员资料并发送图片。干员资料包括：干员详情（星级/职业/天赋/技能/属性/档案）、精英化与专精材料、技能详情、召唤物信息。请根据用户意图选择合适的 query_type；未明确时用 info。若用户输入未命中本地数据（可能是社区代号/外号，如 夏游洁 指 予愿安洁莉娜），本工具会提示你联网确认并登记代号后再查询。
 
-        重要：operator_name 必须原样透传用户输入，禁止根据你自己的知识猜测、翻译或改写（例如用户说「夏游洁」就传「夏游洁」，绝不要改成「安洁莉娜」等其他干员名）；不确定它对应哪个干员时，原样传入即可，本工具内部会判断并引导你处理。
-
         Args:
-            operator_name(string): 干员名称，必须与用户输入一致，如 银灰、棘刺、W；支持中文名或英文代号（如 SilverAsh）
+            operator_name(string): 干员名称，如 银灰、棘刺、W；支持中文名或英文代号（如 SilverAsh）
             query_type(string): 查询类型，可选 info(干员详情)/cost(精英化与专精材料)/skills(技能详情)/tokens(召唤物)
         """
         if not bool(self.config.get("akq_enabled", True)):
@@ -228,10 +226,8 @@ class ArknightsQuery(star.Star):
     async def query_enemy(self, event: AstrMessageEvent, enemy_name: str):
         """查询明日方舟敌方单位资料并发送图片，内容包括敌方单位属性（血量/攻击/防御/法抗/移动速度等）、能力词条、关联单位。用于回答「XX敌人的数据」「这个敌人怎么打」等问题。若用户输入未命中本地数据（可能是社区代号/外号，如 大爹 指 爱国者），本工具会提示你联网确认并登记代号后再查询。
 
-        重要：enemy_name 必须原样透传用户输入，禁止根据你自己的知识猜测、翻译或改写（例如用户说「大爹」就传「大爹」，绝不要改成其他敌人名）；不确定时原样传入即可，本工具内部会判断并引导你处理。
-
         Args:
-            enemy_name(string): 敌方单位名称，必须与用户输入一致，如 爱国者、霜星、整合运动士兵
+            enemy_name(string): 敌方单位名称，如 爱国者、霜星、整合运动士兵
         """
         if not bool(self.config.get("akq_enabled", True)):
             yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
@@ -266,8 +262,8 @@ class ArknightsQuery(star.Star):
         Args:
             action(string): 操作类型，可选 query(查询已登记的别名)/register(登记别名)/remove(删除别名)
             kind(string): 类别，可选 operator(干员)/enemy(敌方单位)
-            alias(string): 用户使用的代号，必须原样使用用户输入，如 夏游洁
-            name(string): 对应的官方规范名称，仅 register 时必填（如 予愿安洁莉娜）；登记前请先用联网搜索确认，切勿填入你自己的猜测
+            alias(string): 用户使用的代号，如 夏游洁
+            name(string): 对应的规范名称，仅 register 时必填，如 予愿安洁莉娜
         """
         action = (action or "").strip().lower()
         kind = (kind or "").strip().lower()

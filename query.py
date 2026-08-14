@@ -15,10 +15,12 @@ from .utils import find_most_similar, integer, remove_punctuation, snake_case_to
 # 干员
 # ---------------------------------------------------------------------------
 def search_operator(text: str, use_similar: bool = True):
-    """干员名匹配：代号记录 → 精确 → 英文名 → 包含 → 相似。返回规范名称或 None。
+    """干员名匹配：代号记录 → 精确 → 英文名 →（use_similar）包含 → 相似。返回规范名称或 None。
 
-    use_similar=False 时跳过相似度匹配（相似度对社区外号易误匹配，
-    如「夏游洁」会被误配到「烈夏」），由调用方先走自动联网解析代号。
+    use_similar=False 时跳过全部模糊匹配（包含匹配与相似度匹配）。
+    模糊匹配对社区外号/简称易误匹配：如「圣初雪」会被包含匹配误配到「初雪」，
+    「夏游洁」会被相似度误配到「烈夏」，故 Agent 路径不信任模糊匹配，
+    未命中时交给调用方（Agent）联网确认并登记代号。
     """
     text = (text or "").strip()
     if not text:
@@ -37,16 +39,16 @@ def search_operator(text: str, use_similar: bool = True):
         if op.en_name == text:
             return op.name
 
-    # 包含匹配（干员名出现在输入中）
-    candidates = []
-    for name in GameData.operators.keys():
-        if len(name) > 1 and name in text:
-            candidates.append(name)
-    if candidates:
-        candidates.sort(key=len, reverse=True)
-        return candidates[0]
-
     if use_similar:
+        # 包含匹配（干员名出现在输入中）
+        candidates = []
+        for name in GameData.operators.keys():
+            if len(name) > 1 and name in text:
+                candidates.append(name)
+        if candidates:
+            candidates.sort(key=len, reverse=True)
+            return candidates[0]
+
         # 相似度匹配
         names = list(GameData.operators.keys())
         res = find_most_similar(remove_punctuation(text), names)
@@ -231,9 +233,10 @@ def get_enemy(name: str, get_links: bool = True):
 
 
 def search_enemy(text: str, use_similar: bool = True):
-    """敌方名匹配：代号记录 → 精确 → 索引号 → 相似度。返回规范名称或 None。
+    """敌方名匹配：代号记录 → 精确 → 索引号 →（use_similar）包含/相似。返回规范名称或 None。
 
-    use_similar=False 时跳过相似度匹配，由调用方先走自动联网解析代号。
+    use_similar=False 时跳过全部模糊匹配（包含匹配与相似度匹配），
+    Agent 路径不信任模糊匹配，未命中时交给调用方（Agent）联网确认并登记代号。
     """
     text = (text or "").strip()
     if not text:
@@ -252,16 +255,16 @@ def search_enemy(text: str, use_similar: bool = True):
         if str(item["info"].get("enemyIndex")) == text:
             return item["info"]["name"]
 
-    res = find_enemies(text)
-    if res:
-        if len(res) == 1:
-            return res[0][0]
-        # 多个结果：优先完整名/排序最匹配
-        names = [r[0] for r in res]
-        best = find_most_similar(text, names)
-        return best
-
     if use_similar:
+        res = find_enemies(text)
+        if res:
+            if len(res) == 1:
+                return res[0][0]
+            # 多个结果：优先完整名/排序最匹配
+            names = [r[0] for r in res]
+            best = find_most_similar(text, names)
+            return best
+
         return find_most_similar(remove_punctuation(text), list(GameData.enemies.keys()))
     return None
 
