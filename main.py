@@ -66,8 +66,17 @@ FORCE_QUERY_TOOL_PROMPT = """\
 用户正在请求查询明日方舟数据（干员/材料/敌方单位）。本机器人提供 arknights_query_operator、
 arknights_query_material、arknights_query_enemy 三个查询工具，它们会自动生成资料图片并发送给用户。
 你必须调用对应查询工具完成查询并让工具发送图片，不要只回复文字、不要自行编造数据。
-如果查询工具返回"本地未找到"的引导，请严格按引导执行：第1步调用 web_search_tavily 确认官方名称，
-第2步调用 arknights_query_alias 登记代号，第3步调用查询工具（传官方名称）出图。
+
+名称传参规则（必须遵守）：
+1. 用户消息中明确给出了名称（如「查一下二哥」「兔兔干员二哥数据」），必须把该名称【原样】作为
+   operator_name/enemy_name/material_name 参数传入。不要自行联想、翻译、替换成其他名称
+   （例如用户说"二哥"就传"二哥"，绝对不要自作主张传成"棘刺"或别的干员）。
+2. 只有当用户没有给出名称、需要你根据对话上下文推断干员时（如「再查一下他的专精材料」），
+   才使用上下文中的干员名。
+3. 若查询工具返回"本地未找到"的引导，请严格按引导执行：第1步调用 web_search_tavily 确认官方名称，
+   第2步调用 arknights_query_alias 登记代号，第3步调用查询工具（传确认后的官方名称）出图。
+   在通过联网搜索确认官方名称之前，禁止用任何猜测的名称直接调用查询工具。
+
 调用查询工具是完成本任务的唯一正确方式，请立即执行。\
 """
 
@@ -156,10 +165,10 @@ class ArknightsQuery(star.Star):
             f"如 大爹 指 爱国者）。请立即按以下三步顺序执行，不要用文字直接回复用户，"
             "最终必须通过查询工具发送图片：\n"
             f"第1步：调用 web_search_tavily 搜索「明日方舟 {label} {user_input}」，"
-            f"确认其对应的官方名称；\n"
+            f"确认其对应的官方名称（未确认前禁止用你猜测的名称直接查询）；\n"
             f"第2步：调用 {alias_tool} 登记该代号（action=register, kind={kind}, "
             f"alias={user_input}, name=官方名称）；\n"
-            f"第3步：调用 {query_tool} 查询（传入官方名称），工具会自动发送资料图片。"
+            f"第3步：调用 {query_tool} 查询（传入第1步确认的官方名称），工具会自动发送资料图片。"
         )
 
     # ------------------------------------------------------------------
@@ -195,10 +204,10 @@ class ArknightsQuery(star.Star):
 
     @llm_tool(name="arknights_query_operator")
     async def query_operator(self, event: AstrMessageEvent, operator_name: str, query_type: str = "info"):
-        """查询明日方舟干员资料并发送图片。干员资料包括：干员详情（星级/职业/天赋/技能/属性/档案）、精英化与专精材料、技能详情、召唤物信息。请根据用户意图选择合适的 query_type；未明确时用 info。若用户输入未命中本地数据（可能是社区代号/外号，如 夏游洁 指 予愿安洁莉娜），本工具会提示你联网确认并登记代号后再查询。
+        """查询明日方舟干员资料并发送图片。干员资料包括：干员详情（星级/职业/天赋/技能/属性/档案）、精英化与专精材料、技能详情、召唤物信息。请根据用户意图选择合适的 query_type；未明确时用 info。注意：用户明确给出的干员名请【原样】传入本参数，不要自行替换/猜名（若未命中本地数据，本工具会返回引导，请按引导联网确认官方名称后再查询）。仅当用户未给名称时，才可根据上下文推断干员。
 
         Args:
-            operator_name(string): 干员名称，如 银灰、棘刺、W；支持中文名或英文代号（如 SilverAsh）
+            operator_name(string): 干员名称，用户明确给出时请原样传入（如用户说"二哥"就传"二哥"）；未给出时可用上下文推断，如 银灰、棘刺、W；支持中文名或英文代号（如 SilverAsh）
             query_type(string): 查询类型，可选 info(干员详情)/cost(精英化与专精材料)/skills(技能详情)/tokens(召唤物)
         """
         if not bool(self.config.get("akq_enabled", True)):
@@ -281,10 +290,10 @@ class ArknightsQuery(star.Star):
 
     @llm_tool(name="arknights_query_enemy")
     async def query_enemy(self, event: AstrMessageEvent, enemy_name: str):
-        """查询明日方舟敌方单位资料并发送图片，内容包括敌方单位属性（血量/攻击/防御/法抗/移动速度等）、能力词条、关联单位。用于回答「XX敌人的数据」「这个敌人怎么打」等问题。若用户输入未命中本地数据（可能是社区代号/外号，如 大爹 指 爱国者），本工具会提示你联网确认并登记代号后再查询。
+        """查询明日方舟敌方单位资料并发送图片，内容包括敌方单位属性（血量/攻击/防御/法抗/移动速度等）、能力词条、关联单位。用于回答「XX敌人的数据」「这个敌人怎么打」等问题。注意：用户明确给出的名称请【原样】传入本参数，不要自行替换/猜名（若未命中本地数据，本工具会返回引导，请按引导联网确认官方名称后再查询）。
 
         Args:
-            enemy_name(string): 敌方单位名称，如 爱国者、霜星、整合运动士兵
+            enemy_name(string): 敌方单位名称，用户明确给出时请原样传入；如 爱国者、霜星、整合运动士兵
         """
         if not bool(self.config.get("akq_enabled", True)):
             yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
