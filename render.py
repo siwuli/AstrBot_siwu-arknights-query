@@ -50,6 +50,22 @@ async def html_to_image(template_path: str, data: dict, width: int = 375, render
 
         # 等待 Vue 渲染
         await asyncio.sleep(render_time / 1000)
+
+        # 等待页面内所有图片加载完成（公招/干员等模板立绘多，固定延时可能截到空白图）。
+        # 条件用 complete：图片进入终态（成功或失败）即视为结束——路径缺失/加载失败的图
+        # 不会让等待无限阻塞，只等待真正还在加载中的图片
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const imgs = Array.from(document.querySelectorAll('img'));
+                    if (imgs.length === 0) return true;
+                    return imgs.every(i => i.complete);
+                }""",
+                timeout=10000,
+            )
+        except Exception:
+            logger.warning("等待图片加载超时，使用当前渲染结果截图")
+
         result = await page.screenshot(full_page=True)
         return result
     finally:

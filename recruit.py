@@ -26,6 +26,9 @@ SPECIAL_WORDS = ["高级资深干员", "高级资深", "高资", "资深干员",
 # 口语缩写 → 标准标签
 ABBREV_TAGS = {"近战": "近战位", "远程": "远程位"}
 
+# 组合图最多展示的组合数（标签多时组合数可到十几个，图会超高导致聊天平台显示不全）
+MAX_GROUPS = 6
+
 _tags_cache = None
 _tags_cache_signature = None
 
@@ -181,19 +184,24 @@ def build_groups(tags: list, max_rarity: int):
     if not groups:
         return []
 
-    return sorted(groups, key=lambda n: (-len(n["tags"]), -n["max_rarity"]))
+    groups = sorted(groups, key=lambda n: (-len(n["tags"]), -n["max_rarity"]))
+    return groups[:MAX_GROUPS]
 
 
 def summarize(groups: list, tags: list, max_rarity: int) -> str:
-    """生成给用户的推荐摘要（作为工具消息链中的文字部分，让"AI 说话"而不只是一张图）。"""
+    """生成给用户的推荐摘要（作为工具消息链中的文字部分，让"AI 说话"而不只是一张图）。
+
+    保持简洁：只说最优组合与最高稀有度，详细内容看图。
+    """
     if not groups:
-        return f"很遗憾，根据标签【{'、'.join(tags)}】没有找到可以锁定稀有干员的组合，建议再试试其他标签组合～"
+        return f"根据标签【{'、'.join(tags)}】没找到能锁定稀有干员的组合，建议再补几个标签试试～"
 
     best = groups[0]
-    best_names = "、".join(o["operator_name"] for o in best["operators"])
-    lines = [f"博士，根据标签【{'、'.join(tags)}】，推荐组合如下（图内已按稀有度排序）："]
-    for i, g in enumerate(groups, 1):
-        names = "、".join(o["operator_name"] for o in g["operators"])
-        lines.append(f"{i}. 组合【{'、'.join(g['tags'])}】：最高 {'★' * g['max_rarity']}，{len(g['operators'])} 位（{names}）")
-    lines.append(f"其中【{'、'.join(best['tags'])}】最有价值，最高可锁 {'★' * best['max_rarity']} 干员：{best_names}～")
-    return "\n".join(lines)
+    ops = best["operators"]
+    names = "、".join(o["operator_name"] for o in ops[:4])
+    if len(ops) > 4:
+        names += f" 等 {len(ops)} 位"
+    return (
+        f"博士，【{'、'.join(tags)}】最优组合是【{'、'.join(best['tags'])}】"
+        f"，最高可锁 {'★' * best['max_rarity']}：{names}，详细见下图～"
+    )
