@@ -2,7 +2,7 @@ name: arknights_query
 display_name: 明日方舟查询
 desc: "明日方舟游戏数据查询：干员详情/精英化专精材料/敌方单位。数据自动从 gitee 拉取，支持 Agent 主动调用并发送查询图片"
 help: "对机器人说「查一下干员 银灰」「棘刺专精材料」「查询敌人 爱国者」，或让 Agent 直接调用工具"
-version: 1.0.3
+version: 1.0.4
 author: siwuli
 repo: https://github.com/siwuli/AstrBot_siwu-arknights-query
 astrbot_version: ">=4.0.0"
