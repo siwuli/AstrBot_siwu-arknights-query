@@ -122,16 +122,23 @@ class ArknightsQuery(star.Star):
         return GameData.ready
 
     def _alias_miss_message(self, kind: str, user_input: str) -> str:
-        """本地查找未命中时，返回引导信息：由 Agent 联网搜索确认规范名并登记代号。"""
+        """本地查找未命中时，返回给 Agent 的引导文本（直接 yield 字符串，Agent 才能读到）。
+
+        注意：不要用 event.make_result().message() 发用户消息，那会让 Agent 收到
+        "没有返回值"固定文案而看不到本引导。必须 yield 字符串作为工具返回值。
+        """
         label = "干员" if kind == "operator" else "敌方单位"
         alias_tool = "arknights_query_alias"
+        query_tool = "arknights_query_operator" if kind == "operator" else "arknights_query_enemy"
         return (
-            f"未找到{label}「{user_input}」，本地数据与代号记录中均无此名"
-            "（可能是社区代号/外号，或名称有轻微出入）。"
-            f"建议先调用 web_search_tavily 搜索「明日方舟 {label} {user_input}」"
-            f"确认其对应的官方名称，再用 {alias_tool} 登记该代号"
-            f"（kind={kind}，alias={user_input}，name=官方名称），"
-            "然后重新调用查询工具查询。"
+            f"本地数据与代号记录中未找到{label}「{user_input}」（可能是社区外号/谐音，"
+            f"如 大爹 指 爱国者）。请立即按以下三步顺序执行，不要用文字直接回复用户，"
+            "最终必须通过查询工具发送图片：\n"
+            f"第1步：调用 web_search_tavily 搜索「明日方舟 {label} {user_input}」，"
+            f"确认其对应的官方名称；\n"
+            f"第2步：调用 {alias_tool} 登记该代号（action=register, kind={kind}, "
+            f"alias={user_input}, name=官方名称）；\n"
+            f"第3步：调用 {query_tool} 查询（传入官方名称），工具会自动发送资料图片。"
         )
 
     # ------------------------------------------------------------------
@@ -239,7 +246,8 @@ class ArknightsQuery(star.Star):
         # Agent 路径不信任相似度匹配（社区外号易误匹配），未命中交给 LLM 判断
         name = akq_query.search_enemy(enemy_name, use_similar=False)
         if not name:
-            yield event.make_result().message(self._alias_miss_message("enemy", enemy_name))
+            # 必须 yield 字符串作为工具返回值，Agent 才能读到三步引导（不能只发用户消息）
+            yield self._alias_miss_message("enemy", enemy_name)
             return
 
         try:
@@ -270,12 +278,13 @@ class ArknightsQuery(star.Star):
         alias = (alias or "").strip()
 
         if not bool(self.config.get("akq_enabled", True)):
-            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
+            # 工具返回值（yield 字符串）给 Agent，由 Agent 转达用户
+            yield "博士，明日方舟查询功能当前已关闭。"
             return
 
         if action == "register":
             if not name:
-                yield event.make_result().message("登记代号需要提供规范名称（name），如：夏游洁 → 予愿安洁莉娜。")
+                yield "登记代号需要提供规范名称（name），如：夏游洁 → 予愿安洁莉娜。"
                 return
             # 校验并规范化为搜索命中的规范名，避免登记非规范名
             canonical = None
@@ -284,25 +293,24 @@ class ArknightsQuery(star.Star):
             elif kind == "enemy":
                 canonical = akq_query.search_enemy(name)
             if not canonical:
-                yield event.make_result().message(
-                    f"登记失败：{kind} 类中找不到与「{name}」对应的干员/敌人，请确认名称正确（可用联网搜索确认官方名称）。"
+                yield (
+                    f"登记失败：{kind} 类中找不到与「{name}」对应的干员/敌人，"
+                    "请确认名称正确（可用联网搜索确认官方名称后再登记）。"
                 )
                 return
             if akq_aliases.register(kind, alias, canonical):
-                yield event.make_result().message(
-                    f"已登记代号：{kind}「{alias}」→「{canonical}」。以后直接查询「{alias}」即可命中。"
-                )
+                yield f"已登记代号：{kind}「{alias}」→「{canonical}」。以后直接查询「{alias}」即可命中。"
             else:
-                yield event.make_result().message("登记失败：kind 需为 operator 或 enemy。")
+                yield "登记失败：kind 需为 operator 或 enemy。"
         elif action == "remove":
             if akq_aliases.remove(kind, alias):
-                yield event.make_result().message(f"已删除代号「{alias}」。")
+                yield f"已删除代号「{alias}」。"
             else:
-                yield event.make_result().message(f"代号「{alias}」不存在，无需删除。")
+                yield f"代号「{alias}」不存在，无需删除。"
         elif action == "query":
             table = akq_aliases.all_aliases(kind if kind in ("operator", "enemy") else None)
             if not any(table.values()):
-                yield event.make_result().message("暂无已登记的代号记录。")
+                yield "暂无已登记的代号记录。"
                 return
             lines = []
             for k in ("operator", "enemy"):
@@ -310,9 +318,9 @@ class ArknightsQuery(star.Star):
                     lines.append(f"{k}：")
                     for a, n in table[k].items():
                         lines.append(f"  {a} → {n}")
-            yield event.make_result().message("\n".join(lines))
+            yield "\n".join(lines)
         else:
-            yield event.make_result().message("未知操作，action 可选 query / register / remove。")
+            yield "未知操作，action 可选 query / register / remove。"
 
     # ------------------------------------------------------------------
     # 命令回退（需 @ 或唤醒词）
