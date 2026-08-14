@@ -2,7 +2,8 @@
 """明日方舟查询插件（AstrBot）。
 
 数据自动从 gitee（amiya-bot-assets）拉取并解析到内存，复用 Amiya-Bot 的 HTML 模板
-通过 Playwright 截图出图，支持 Agent 主动调用发送查询图片。
+通过 Playwright 截图出图。工具统一遵循「数据回传 LLM」模式：文字结果 yield 文本给 LLM
+组织语言回复；资料图片 LLM 无法展示，由工具自动直发用户，同时返回简短摘要供 LLM 收尾。
 
 Agent 工具：
     - arknights_query_operator: 查询干员资料（详情/专精材料/技能/召唤物）
@@ -73,17 +74,19 @@ QUERY_INTENT_RE = re.compile(
 )
 
 # 注入到 LLM 请求的强制指令（位于系统提示词末尾，优先级最高）。
-# 目的：让 Agent 在收到查询请求时"必须通过查询工具发送图片"，而不是只回文字；
+# 目的：让 Agent 在收到查询请求时"必须调用查询工具"，而不是只回文字；
 # 当查询工具返回"未找到"引导时，必须按引导执行「联网搜索 → 登记代号 → 查询出图」三步。
+# 输出约定：文字结果由工具 yield 返回给 Agent 组织语言；资料图片由工具自动直发用户，
+# 工具同时返回简短摘要，Agent 据此收尾即可（不得重复发送图片）。
 FORCE_QUERY_TOOL_PROMPT = """\
 [明日方舟查询任务指令]
-用户正在请求查询明日方舟数据。本机器人提供以下查询工具，它们会自动生成资料图片或文字结果并发送给用户：
-- arknights_query_operator：干员资料（详情/专精材料/技能/召唤物），自动发送图片
-- arknights_query_material：材料资料（合成/掉落/价值），自动发送图片
-- arknights_query_enemy：敌方单位资料，自动发送图片
-- arknights_query_stage：关卡资料（地图/敌方单位/掉落/生息演算地图），单个关卡自动发送图片，同名多关卡或活动列表返回文字
-- arknights_query_term：术语/地形说明，返回文字
-- arknights_query_recruit：公开招募（公招）标签组合推荐，自动发送「推荐语+组合图」（含可锁定干员与最高稀有度）；用户发送公招界面截图时也会自动识别图中标签
+用户正在请求查询明日方舟数据。本机器人提供以下查询工具：
+- arknights_query_operator：干员资料（详情/专精材料/技能/召唤物），返回资料图片（直发）与摘要文本
+- arknights_query_material：材料资料（合成/掉落/价值），返回资料图片（直发）与摘要文本
+- arknights_query_enemy：敌方单位资料，返回资料图片（直发）与摘要文本
+- arknights_query_stage：关卡资料（地图/敌方单位/掉落/生息演算地图），单关卡返回地图图片（直发）与摘要文本；同名多关卡/活动列表返回文字由你转达
+- arknights_query_term：术语/地形说明，返回文字由你整理后回复
+- arknights_query_recruit：公开招募（公招）标签组合推荐，返回推荐组合图（直发）与推荐语文本；用户发送公招界面截图时也会自动识别图中标签
 
 执行规则（必须严格遵守）：
 1.【第一步必须调用查询工具】把用户消息中出现的名称【原样】作为参数调用对应查询工具
@@ -102,22 +105,22 @@ FORCE_QUERY_TOOL_PROMPT = """\
 4.【未命中引导】若查询工具返回"本地未找到"的引导，严格按引导执行：第1步调用 web_search_tavily
    确认官方名称，第2步调用 arknights_query_alias 登记代号，第3步调用查询工具（传确认后的官方名称）出图。
    在通过联网搜索确认官方名称之前，禁止用任何猜测的名称直接查询。
-5.【禁止重复发送】本插件的查询工具会自动把图片/文字结果发送给用户，因此：
-   a) 禁止调用 send_message_to_user 等任何通用发消息工具（会与工具发送的结果重复，同一条消息发两遍）；
-   b) 若查询工具已发送结果，最终回复不得复述工具已发送的内容，只输出一句简短收尾（或直接不输出文字）。
-6.【输出要求】干员/材料/敌方/单关卡查询，用户要的是资料图片，最终必须通过查询工具发送图片；
-   关卡列表、活动列表、术语说明是文字结果，由工具直接发送文字。无论哪种，只回复文字总结而跳过工具都视为任务失败。
-
-调用查询工具是完成本任务的唯一正确方式，请立即执行。\
+5.【图片直发、文字自组织】资料图片会由查询工具直接发送给用户，工具同时返回简短摘要；
+   你收到摘要后正常组织语言向用户收尾即可（说明查了什么、图已发送），
+   不要复述/编造图片中的具体数值，不要重复发送图片，不要调用 send_message_to_user 等通用发消息工具。
+   文字类结果（术语、候选列表、活动列表）由工具返回给你，由你整理成自然语言回复用户；
+   其中候选列表请列给用户并让其回复序号，再用原名称加 stage_index 重新调用 arknights_query_stage。
+6.【输出要求】干员/材料/敌方/单关卡查询，用户要的是资料图片，最终必须通过查询工具交付图片；
+   只回复文字总结而跳过工具都视为任务失败。\
 """
 
-# 查询工具成功发送结果后返回给 Agent 的完成提示。
-# 若不返回（工具直接发送）AstrBot 会提示「没有返回值」，Agent 会误以为工具失败，
-# 从而自行补充一段文字回复（与已发送的图片/文字重复，甚至误报"工具挂了"）。
-TOOL_DONE_PROMPT = (
-    "查询已完成，结果图片/文字已直接发送给用户。"
-    "请勿重复发送、复述或总结图片中的内容，本轮直接简短收尾即可（甚至可以不再输出文字）。"
-)
+
+def _image_sent_text(subject: str) -> str:
+    """资料图片直发后返回给 Agent 的简短摘要：告知图片已发送、内容是什么，让 Agent 自然收尾。"""
+    return (
+        f"已向用户直接发送「{subject}」的资料图片。"
+        "请基于本次查询向用户简短收尾说明即可，不要复述或编造图片中的具体数值细节。"
+    )
 
 # 公招截图标签识别提示词（视觉模型）。重点：逐格查看、全部列出、禁止只挑几个。
 RECRUIT_VISION_PROMPT = """这是一张《明日方舟》公开招募(公招)界面的截图，图中包含若干招募标签（如：近战位、远程位、先锋、近卫、重装、狙击、医疗、辅助、术师、特种、资深干员、高级资深干员、控场、爆发、支援、支援机械、削弱、快速复活、位移、召唤、生存、防护、群攻、治疗、输出、费用回复、减速、牵制、元素 等）。
@@ -259,9 +262,8 @@ class ArknightsQuery(star.Star):
                 if tool:
                     req.func_tool.add_tool(tool)
 
-        # 3) 查询场景移除内置发消息工具：查询工具会自动把结果发送给用户，
-        #    若 Agent 再调 send_message_to_user 会重复发送同一内容（且文本差异会绕过 AstrBot 内置去重）。
-        #    作为「禁止重复发送」规则的硬性兜底。
+        # 3) 查询场景移除内置发消息工具：资料图片由查询工具自动直发，
+        #    若 Agent 再调 send_message_to_user 会与已直发的图片/最终回复重复，作为硬性兜底。
         if req.func_tool is not None:
             try:
                 if "send_message_to_user" in req.func_tool.names():
@@ -278,16 +280,16 @@ class ArknightsQuery(star.Star):
             query_type(string): 查询类型，可选 info(干员详情)/cost(精英化与专精材料)/skills(技能详情)/tokens(召唤物)
         """
         if not bool(self.config.get("akq_enabled", True)):
-            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
+            yield "博士，明日方舟查询功能当前已关闭。"
             return
         if not await self._wait_ready():
-            yield event.make_result().message(self._not_ready_message())
+            yield self._not_ready_message()
             return
 
         # Agent 路径不信任相似度匹配（社区外号易误匹配），未命中交给 LLM 判断
         name = akq_query.search_operator(operator_name, use_similar=False)
         if not name:
-            # 必须 yield 字符串作为工具返回值，Agent 才能读到三步引导（不能只发用户消息）
+            # 未命中引导必须 yield 字符串作为工具返回值，Agent 才能读到三步引导
             yield self._alias_miss_message("operator", operator_name)
             return
 
@@ -309,18 +311,19 @@ class ArknightsQuery(star.Star):
                 template = "operatorInfo.html"
 
             if not data:
-                yield event.make_result().message(f"博士，查询干员「{name}」的资料失败了。")
+                yield f"博士，查询干员「{name}」的资料失败了。"
                 return
 
             width = int(self.config.get("akq_render_width", 1280))
             timeout = int(self.config.get("akq_render_timeout", 30))
             tag = f"operator_{query_type}_{name}"
             path = await _render_to_image(template, data, width, timeout, tag)
+            # 资料图片直接发送给用户（LLM 无法展示图片），同时返回简短摘要供 Agent 收尾
             yield event.make_result().file_image(path)
-            yield TOOL_DONE_PROMPT
+            yield _image_sent_text(f"干员「{name}」{QUERY_TYPE_HINT.get(query_type, '资料')}")
         except Exception as e:
             logger.exception(f"干员查询渲染失败: {e}")
-            yield event.make_result().message(f"博士，查询干员「{name}」时出错了：{e}")
+            yield f"博士，查询干员「{name}」时出错了：{e}"
 
     @llm_tool(name="arknights_query_material")
     async def query_material(self, event: AstrMessageEvent, material_name: str):
@@ -330,32 +333,31 @@ class ArknightsQuery(star.Star):
             material_name(string): 材料名称，如 提纯源岩、固源岩组、龙门币
         """
         if not bool(self.config.get("akq_enabled", True)):
-            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
+            yield "博士，明日方舟查询功能当前已关闭。"
             return
         if not await self._wait_ready():
-            yield event.make_result().message(self._not_ready_message())
+            yield self._not_ready_message()
             return
 
         name = akq_query.search_material(material_name)
         if not name:
-            yield event.make_result().message(
-                f"博士，没有找到材料「{material_name}」的资料，请确认名称是否正确～"
-            )
+            yield f"博士，没有找到材料「{material_name}」的资料，请确认名称是否正确～"
             return
 
         try:
             data = akq_query.check_material(name)
             if not data:
-                yield event.make_result().message(f"博士，查询材料「{name}」的资料失败了。")
+                yield f"博士，查询材料「{name}」的资料失败了。"
                 return
             width = int(self.config.get("akq_render_width", 1280))
             timeout = int(self.config.get("akq_render_timeout", 30))
             path = await _render_to_image("material.html", data, width, timeout, f"material_{name}")
+            # 资料图片直接发送给用户（LLM 无法展示图片），同时返回简短摘要供 Agent 收尾
             yield event.make_result().file_image(path)
-            yield TOOL_DONE_PROMPT
+            yield _image_sent_text(f"材料「{name}」")
         except Exception as e:
             logger.exception(f"材料查询渲染失败: {e}")
-            yield event.make_result().message(f"博士，查询材料「{name}」时出错了：{e}")
+            yield f"博士，查询材料「{name}」时出错了：{e}"
 
     @llm_tool(name="arknights_query_enemy")
     async def query_enemy(self, event: AstrMessageEvent, enemy_name: str):
@@ -365,32 +367,33 @@ class ArknightsQuery(star.Star):
             enemy_name(string): 敌方单位名称，用户明确给出时请原样传入；如 爱国者、霜星、整合运动士兵
         """
         if not bool(self.config.get("akq_enabled", True)):
-            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
+            yield "博士，明日方舟查询功能当前已关闭。"
             return
         if not await self._wait_ready():
-            yield event.make_result().message(self._not_ready_message())
+            yield self._not_ready_message()
             return
 
         # Agent 路径不信任相似度匹配（社区外号易误匹配），未命中交给 LLM 判断
         name = akq_query.search_enemy(enemy_name, use_similar=False)
         if not name:
-            # 必须 yield 字符串作为工具返回值，Agent 才能读到三步引导（不能只发用户消息）
+            # 未命中引导必须 yield 字符串作为工具返回值，Agent 才能读到三步引导
             yield self._alias_miss_message("enemy", enemy_name)
             return
 
         try:
             data = akq_query.get_enemy(name)
             if not data:
-                yield event.make_result().message(f"博士，查询敌方单位「{name}」的资料失败了。")
+                yield f"博士，查询敌方单位「{name}」的资料失败了。"
                 return
             width = int(self.config.get("akq_render_width", 1280))
             timeout = int(self.config.get("akq_render_timeout", 30))
             path = await _render_to_image("enemy.html", data, width, timeout, f"enemy_{name}")
+            # 资料图片直接发送给用户（LLM 无法展示图片），同时返回简短摘要供 Agent 收尾
             yield event.make_result().file_image(path)
-            yield TOOL_DONE_PROMPT
+            yield _image_sent_text(f"敌方单位「{name}」")
         except Exception as e:
             logger.exception(f"敌方单位查询渲染失败: {e}")
-            yield event.make_result().message(f"博士，查询敌方单位「{name}」时出错了：{e}")
+            yield f"博士，查询敌方单位「{name}」时出错了：{e}"
 
     @llm_tool(name="arknights_query_stage")
     async def query_stage(
@@ -403,23 +406,24 @@ class ArknightsQuery(star.Star):
             stage_index(string): 当关卡名命中多个同名关卡时，用于指定序号（1,2,3...），默认为空
         """
         if not bool(self.config.get("akq_enabled", True)):
-            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
+            yield "博士，明日方舟查询功能当前已关闭。"
             return
         if not await self._wait_ready():
-            yield event.make_result().message(self._not_ready_message())
+            yield self._not_ready_message()
             return
 
         stage_name = (stage_name or "").strip()
         if not stage_name:
-            yield event.make_result().message("博士，请提供要查询的关卡代号或名称，例如：1-7、CE-6、SV-3。")
+            yield "博士，请提供要查询的关卡代号或名称，例如：1-7、CE-6、SV-3。"
             return
 
         try:
             # 0) 生息演算地图（sxys.json，COS 下载图片）
             sxys_path = await self._query_sxys(stage_name)
             if sxys_path:
+                # 地图图片直接发送给用户（LLM 无法展示图片），同时返回简短摘要供 Agent 收尾
                 yield event.make_result().file_image(sxys_path)
-                yield TOOL_DONE_PROMPT
+                yield _image_sent_text(f"生息演算地图「{stage_name}」")
                 return
 
             # 1) 关卡匹配（代号/名称 + 难度）
@@ -438,32 +442,31 @@ class ArknightsQuery(star.Star):
                     if idx is not None and 0 <= idx < len(stage_ids):
                         stage_id = stage_ids[idx]
                 if not stage_id:
-                    # 同名/同代号多关卡：候选列表交给 Agent 转达用户选择
+                    # 同名/同代号多关卡：候选列表返回给 Agent 转达用户选择
                     yield self._stage_candidates_text(stage_ids, level_str)
                     return
 
                 data = self._build_stage_data(stage_id, level, level_str)
                 if not data:
-                    yield event.make_result().message(f"博士，查询关卡「{stage_name}」的资料失败了。")
+                    yield f"博士，查询关卡「{stage_name}」的资料失败了。"
                     return
                 width = int(self.config.get("akq_render_width", 1280))
                 timeout = int(self.config.get("akq_render_timeout", 30))
                 path = await _render_to_image("stage.html", data, width, timeout, f"stage_{stage_id}")
+                # 关卡资料图片直接发送给用户（LLM 无法展示图片），同时返回简短摘要供 Agent 收尾
                 yield event.make_result().file_image(path)
-                yield TOOL_DONE_PROMPT
+                yield _image_sent_text(f"关卡「{data['name']}」")
                 return
 
-            # 2) 活动名匹配 → 活动关卡列表
+            # 2) 活动名匹配 → 活动关卡列表（文字返回给 Agent 整理）
             story_name, ss_ids = akq_query.search_side_story(stage_name)
             if story_name:
-                yield event.make_result().message(self._side_story_list_text(story_name, ss_ids))
-                yield TOOL_DONE_PROMPT
+                yield self._side_story_list_text(story_name, ss_ids)
                 return
 
-            # 3) 活动列表
+            # 3) 活动列表（文字返回给 Agent 整理）
             if "活动" in stage_name:
-                yield event.make_result().message(self._activity_list_text())
-                yield TOOL_DONE_PROMPT
+                yield self._activity_list_text()
                 return
 
             # 4) 未命中
@@ -474,7 +477,7 @@ class ArknightsQuery(star.Star):
             )
         except Exception as e:
             logger.exception(f"关卡查询渲染失败: {e}")
-            yield event.make_result().message(f"博士，查询关卡「{stage_name}」时出错了：{e}")
+            yield f"博士，查询关卡「{stage_name}」时出错了：{e}"
 
     @llm_tool(name="arknights_query_term")
     async def query_term(self, event: AstrMessageEvent, term_name: str):
@@ -484,15 +487,15 @@ class ArknightsQuery(star.Star):
             term_name(string): 术语/地形名称，如 眩晕、束缚、睡莲、草丛
         """
         if not bool(self.config.get("akq_enabled", True)):
-            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
+            yield "博士，明日方舟查询功能当前已关闭。"
             return
         if not await self._wait_ready():
-            yield event.make_result().message(self._not_ready_message())
+            yield self._not_ready_message()
             return
 
         term_name = (term_name or "").strip()
         if not term_name:
-            yield event.make_result().message("博士，请提供要查询的术语名称，例如：眩晕、束缚、草丛。")
+            yield "博士，请提供要查询的术语名称，例如：眩晕、束缚、草丛。"
             return
 
         results = akq_query.search_term(term_name)
@@ -508,8 +511,7 @@ class ArknightsQuery(star.Star):
             text += f"【{item['name']}】\n{item['description']}\n"
         if len(results) > 12:
             text += f"\n（共找到 {len(results)} 条，仅显示前 12 条，可换更精确的名称查询）"
-        yield event.make_result().message(text)
-        yield TOOL_DONE_PROMPT
+        yield text
 
     @llm_tool(name="arknights_query_recruit")
     async def query_recruit(self, event: AstrMessageEvent, tags_text: str = ""):
@@ -519,10 +521,10 @@ class ArknightsQuery(star.Star):
             tags_text(string): 公招标签文本，用户原样提供的标签或粘贴的标签组合，如 "生存防护"、"近战 生存"、"资深 快速复活"、"高资 群攻 输出"；用户仅发截图时可留空
         """
         if not bool(self.config.get("akq_enabled", True)):
-            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
+            yield "博士，明日方舟查询功能当前已关闭。"
             return
         if not await self._wait_ready():
-            yield event.make_result().message(self._not_ready_message())
+            yield self._not_ready_message()
             return
 
         text = (tags_text or "").strip()
@@ -560,15 +562,15 @@ class ArknightsQuery(star.Star):
                 "operatorRecruit.html", data, width, timeout, f"recruit_{'_'.join(tags)}"
             )
 
-            # 「AI 说话 + 图」：一条消息链同时携带推荐语文字与组合图
-            result = event.make_result()
-            result.message(akq_recruit.summarize(groups, tags, max_rarity))
-            result.file_image(path)
-            yield result
-            yield TOOL_DONE_PROMPT
+            # 推荐组合图直接发送给用户（LLM 无法展示图片），推荐语返回给 Agent 组织语言
+            yield event.make_result().file_image(path)
+            yield (
+                f"{akq_recruit.summarize(groups, tags, max_rarity)}\n\n"
+                "以上推荐组合图已直接发送给用户，请基于这份推荐语组织语言向用户呈现推荐结果。"
+            )
         except Exception as e:
             logger.exception(f"公招查询渲染失败: {e}")
-            yield event.make_result().message(f"博士，查询公招组合时出错了：{e}")
+            yield f"博士，查询公招组合时出错了：{e}"
 
     # ------------------------------------------------------------------
     # 公招截图标签识别（视觉模型）
