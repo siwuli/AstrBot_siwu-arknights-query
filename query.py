@@ -14,8 +14,12 @@ from .utils import find_most_similar, integer, remove_punctuation, snake_case_to
 # ---------------------------------------------------------------------------
 # 干员
 # ---------------------------------------------------------------------------
-def search_operator(text: str):
-    """干员名匹配：代号记录 → 精确 → 英文名 → 包含 → 相似。返回规范名称或 None。"""
+def search_operator(text: str, use_similar: bool = True):
+    """干员名匹配：代号记录 → 精确 → 英文名 → 包含 → 相似。返回规范名称或 None。
+
+    use_similar=False 时跳过相似度匹配（相似度对社区外号易误匹配，
+    如「夏游洁」会被误配到「烈夏」），由调用方先走自动联网解析代号。
+    """
     text = (text or "").strip()
     if not text:
         return None
@@ -42,11 +46,12 @@ def search_operator(text: str):
         candidates.sort(key=len, reverse=True)
         return candidates[0]
 
-    # 相似度匹配
-    names = list(GameData.operators.keys())
-    res = find_most_similar(remove_punctuation(text), names)
-    if res:
-        return res
+    if use_similar:
+        # 相似度匹配
+        names = list(GameData.operators.keys())
+        res = find_most_similar(remove_punctuation(text), names)
+        if res:
+            return res
     return None
 
 
@@ -225,8 +230,11 @@ def get_enemy(name: str, get_links: bool = True):
     return {**enemy, "attrs": attrs, "link_items": link_items}
 
 
-def search_enemy(text: str):
-    """敌方名匹配：代号记录 → 精确 → 索引号 → 相似度。返回规范名称或 None。"""
+def search_enemy(text: str, use_similar: bool = True):
+    """敌方名匹配：代号记录 → 精确 → 索引号 → 相似度。返回规范名称或 None。
+
+    use_similar=False 时跳过相似度匹配，由调用方先走自动联网解析代号。
+    """
     text = (text or "").strip()
     if not text:
         return None
@@ -253,6 +261,8 @@ def search_enemy(text: str):
         best = find_most_similar(text, names)
         return best
 
+    if use_similar:
+        return find_most_similar(remove_punctuation(text), list(GameData.enemies.keys()))
     return None
 
 

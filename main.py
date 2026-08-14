@@ -121,12 +121,25 @@ class ArknightsQuery(star.Star):
                 return False
         return GameData.ready
 
+    async def _alias_miss_message(self, kind: str, user_input: str) -> str:
+        """本地查找未命中时，返回引导信息：由 Agent 联网搜索确认规范名并登记代号。"""
+        label = "干员" if kind == "operator" else "敌方单位"
+        alias_tool = "arknights_query_alias"
+        return (
+            f"未找到{label}「{user_input}」，本地数据与代号记录中均无此名"
+            "（可能是社区代号/外号，或名称有轻微出入）。"
+            f"建议先调用 web_search_tavily 搜索「明日方舟 {label} {user_input}」"
+            f"确认其对应的官方名称，再用 {alias_tool} 登记该代号"
+            f"（kind={kind}，alias={user_input}，name=官方名称），"
+            "然后重新调用查询工具查询。"
+        )
+
     # ------------------------------------------------------------------
     # Agent 工具
     # ------------------------------------------------------------------
     @llm_tool(name="arknights_query_operator")
     async def query_operator(self, event: AstrMessageEvent, operator_name: str, query_type: str = "info"):
-        """查询明日方舟干员资料并发送图片。干员资料包括：干员详情（星级/职业/天赋/技能/属性/档案）、精英化与专精材料、技能详情、召唤物信息。请根据用户意图选择合适的 query_type；未明确时用 info。
+        """查询明日方舟干员资料并发送图片。干员资料包括：干员详情（星级/职业/天赋/技能/属性/档案）、精英化与专精材料、技能详情、召唤物信息。请根据用户意图选择合适的 query_type；未明确时用 info。若用户输入未命中本地数据（可能是社区代号/外号，如 夏游洁 指 予愿安洁莉娜），本工具会提示你联网确认并登记代号后再查询。
 
         Args:
             operator_name(string): 干员名称，如 银灰、棘刺、W；支持中文名或英文代号（如 SilverAsh）
@@ -139,13 +152,10 @@ class ArknightsQuery(star.Star):
             yield event.make_result().message(self._not_ready_message())
             return
 
-        name = akq_query.search_operator(operator_name)
+        # Agent 路径不信任相似度匹配（社区外号易误匹配），未命中交给 LLM 判断
+        name = akq_query.search_operator(operator_name, use_similar=False)
         if not name:
-            yield event.make_result().message(
-                f"未找到干员「{operator_name}」。这可能是社区代号/外号，本地数据与代号记录中均无此名。"
-                "可联网搜索确认其对应的干员规范名，然后调用 arknights_query_alias 登记（如 夏游洁 → 予愿安洁莉），"
-                "登记后即可正常查询；若用户反馈不对，请用 arknights_query_alias 更新记录。"
-            )
+            yield event.make_result().message(self._alias_miss_message("operator", operator_name))
             return
 
         query_type = (query_type or "info").strip().lower()
@@ -214,7 +224,7 @@ class ArknightsQuery(star.Star):
 
     @llm_tool(name="arknights_query_enemy")
     async def query_enemy(self, event: AstrMessageEvent, enemy_name: str):
-        """查询明日方舟敌方单位资料并发送图片，内容包括敌方单位属性（血量/攻击/防御/法抗/移动速度等）、能力词条、关联单位。用于回答「XX敌人的数据」「这个敌人怎么打」等问题。
+        """查询明日方舟敌方单位资料并发送图片，内容包括敌方单位属性（血量/攻击/防御/法抗/移动速度等）、能力词条、关联单位。用于回答「XX敌人的数据」「这个敌人怎么打」等问题。若用户输入未命中本地数据（可能是社区代号/外号，如 大爹 指 爱国者），本工具会提示你联网确认并登记代号后再查询。
 
         Args:
             enemy_name(string): 敌方单位名称，如 爱国者、霜星、整合运动士兵
@@ -226,13 +236,10 @@ class ArknightsQuery(star.Star):
             yield event.make_result().message(self._not_ready_message())
             return
 
-        name = akq_query.search_enemy(enemy_name)
+        # Agent 路径不信任相似度匹配（社区外号易误匹配），未命中交给 LLM 判断
+        name = akq_query.search_enemy(enemy_name, use_similar=False)
         if not name:
-            yield event.make_result().message(
-                f"未找到敌方单位「{enemy_name}」。这可能是社区代号/外号，本地数据与代号记录中均无此名。"
-                "可联网搜索确认其对应的规范名，然后调用 arknights_query_alias 登记；"
-                "登记后即可正常查询；若用户反馈不对，请用 arknights_query_alias 更新记录。"
-            )
+            yield event.make_result().message(self._alias_miss_message("enemy", enemy_name))
             return
 
         try:
