@@ -8,11 +8,14 @@ Agent 工具：
     - arknights_query_operator: 查询干员资料（详情/专精材料/技能/召唤物）
     - arknights_query_material: 查询材料（合成树/掉落/一图流价值）
     - arknights_query_enemy:    查询敌方单位资料
+    - arknights_query_stage:    查询关卡（地图/敌人/掉落/生息演算地图）
+    - arknights_query_term:     查询术语/地形说明
 命令回退（需 @ 或唤醒词）：
-    - 查干员 xxx / 查材料 xxx / 查敌人 xxx
+    - 查干员 xxx / 查材料 xxx / 查敌人 xxx / 查关卡 xxx / 查术语 xxx
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -32,6 +35,7 @@ from . import gamedata
 from . import query as akq_query
 from . import render as akq_render
 from .gamedata import GAMEDATA_DIR, GameData
+from .utils import remove_punctuation
 
 logger = logging.getLogger("astrbot")
 
@@ -45,6 +49,12 @@ TMP_DIR = os.path.join(get_astrbot_data_path(), "arknights_query", "tmp")
 # 渲染等待毫秒数（Vue 渲染时间，与 Amiya-Bot 默认一致）
 RENDER_TIME_MS = 500
 
+# 多区块地图关卡（与 Amiya-Bot stages 插件一致）：地图用 {stageId}_1 / {stageId}_2 两张图
+MULTIPLE_ZONE_STAGE = {"CF-9": 2, "CF-EX-8": 2, "CF-S-1": 2}
+
+# 生息演算地图（sxys.json 记录的名称 → COS 资源 key）
+SXYS_MAP_URL = "https://amiyabot-1302462817.cos.ap-guangzhou.myqcloud.com/resource/maps/{key}.jpg"
+
 QUERY_TYPE_HINT = {
     "info": "干员详情",
     "cost": "精英化/专精材料",
@@ -52,9 +62,9 @@ QUERY_TYPE_HINT = {
     "tokens": "召唤物",
 }
 
-# 查询意图关键词（Agent 强制工具调用钩子使用）：命中则认为用户在做明日方舟数据查询。
+# 查询意图关键词（Agent 强制工具调用钩子使用）：命中则认为用户在请求明日方舟数据查询。
 QUERY_INTENT_RE = re.compile(
-    r"查|查询|专精|技能|召唤物|材料|干员|敌人|敌方|怎么打|哪里刷|数据|资料|属性",
+    r"查|查询|专精|技能|召唤物|材料|干员|敌人|敌方|怎么打|哪里刷|数据|资料|属性|关卡|地图|术语|地形|活动|突袭|磨难",
     re.I,
 )
 
@@ -63,21 +73,26 @@ QUERY_INTENT_RE = re.compile(
 # 当查询工具返回"未找到"引导时，必须按引导执行「联网搜索 → 登记代号 → 查询出图」三步。
 FORCE_QUERY_TOOL_PROMPT = """\
 [明日方舟查询任务指令]
-用户正在请求查询明日方舟数据（干员/材料/敌方单位）。本机器人提供 arknights_query_operator、
-arknights_query_material、arknights_query_enemy 三个查询工具，它们会自动生成资料图片并发送给用户。
+用户正在请求查询明日方舟数据。本机器人提供以下查询工具，它们会自动生成资料图片或文字结果并发送给用户：
+- arknights_query_operator：干员资料（详情/专精材料/技能/召唤物），自动发送图片
+- arknights_query_material：材料资料（合成/掉落/价值），自动发送图片
+- arknights_query_enemy：敌方单位资料，自动发送图片
+- arknights_query_stage：关卡资料（地图/敌方单位/掉落/生息演算地图），单个关卡自动发送图片，同名多关卡或活动列表返回文字
+- arknights_query_term：术语/地形说明，返回文字
 
 执行规则（必须严格遵守）：
 1.【第一步必须调用查询工具】把用户消息中出现的名称【原样】作为参数调用对应查询工具
-   （干员→arknights_query_operator，敌方→arknights_query_enemy，材料→arknights_query_material）。
+   （干员→arknights_query_operator，敌方→arknights_query_enemy，材料→arknights_query_material，
+   关卡/地图/活动→arknights_query_stage，术语/地形→arknights_query_term）。
    禁止先联网搜索、禁止直接文字回答。
-2.【名称原样传参】用户明确给出名称就原样传入（如用户说"大哥"就传"大哥"，说"二哥"就传"二哥"），
+2.【名称原样传参】用户明确给出名称就原样传入（如用户说"大哥"就传"大哥"，说"1-7 突袭"就传"1-7 突袭"），
    不要自行联想、翻译、替换成其他名称（例如绝不要自作主张传成别的干员名）。
    仅当用户没有给出名称时（如「再查一下他的专精材料」），才用对话上下文推断。
 3.【未命中引导】若查询工具返回"本地未找到"的引导，严格按引导执行：第1步调用 web_search_tavily
    确认官方名称，第2步调用 arknights_query_alias 登记代号，第3步调用查询工具（传确认后的官方名称）出图。
    在通过联网搜索确认官方名称之前，禁止用任何猜测的名称直接查询。
-4.【输出要求】用户要的是资料图片。最终必须通过查询工具发送图片。即使你已通过联网搜索拿到了数据，
-   也必须调用查询工具发送图片，绝不能只回复文字。只回复文字视为任务失败。
+4.【输出要求】干员/材料/敌方/单关卡查询，用户要的是资料图片，最终必须通过查询工具发送图片；
+   关卡列表、活动列表、术语说明是文字结果，由工具直接发送文字。无论哪种，只回复文字总结而跳过工具都视为任务失败。
 
 调用查询工具是完成本任务的唯一正确方式，请立即执行。\
 """
@@ -104,6 +119,7 @@ class ArknightsQuery(star.Star):
         super().__init__(context, config)
         self.config = config or {}
         self._init_task: asyncio.Task | None = None
+        self._sxys_maps: dict | None = None
 
     # ------------------------------------------------------------------
     # 生命周期：数据初始化
@@ -199,7 +215,13 @@ class ArknightsQuery(star.Star):
         # 2) 确保查询工具在本次请求中可用
         if req.func_tool is not None:
             manager = self.context.get_llm_tool_manager()
-            for tool_name in ("arknights_query_operator", "arknights_query_material", "arknights_query_enemy"):
+            for tool_name in (
+                "arknights_query_operator",
+                "arknights_query_material",
+                "arknights_query_enemy",
+                "arknights_query_stage",
+                "arknights_query_term",
+            ):
                 tool = manager.get_func(tool_name)
                 if tool:
                     req.func_tool.add_tool(tool)
@@ -323,6 +345,213 @@ class ArknightsQuery(star.Star):
         except Exception as e:
             logger.exception(f"敌方单位查询渲染失败: {e}")
             yield event.make_result().message(f"博士，查询敌方单位「{name}」时出错了：{e}")
+
+    @llm_tool(name="arknights_query_stage")
+    async def query_stage(
+        self, event: AstrMessageEvent, stage_name: str, stage_index: str = ""
+    ):
+        """查询明日方舟关卡资料。单个关卡自动发送图片（含地图/敌方单位/掉落详情）；生息演算地图直接发送地图图片；同名/同代号多关卡返回候选列表（配合 stage_index 选择）；输入活动名返回该活动关卡列表。用于回答「1-7 怎么打」「CE-6 掉落」「SV-3 突袭」「骑兵与猎人的关卡」「生息演算 寻觅道路」等问题。注意：用户明确给出的关卡代号/名称请【原样】传入本参数（如"1-7 突袭"），不要自行猜测替换；若返回候选列表，请把列表发给用户并让用户回复序号，再用同样的关卡名加上 stage_index 重新调用本工具出图。
+
+        Args:
+            stage_name(string): 关卡代号或名称，原样传入，如 1-7、CE-6、SV-3、暴君、骑兵与猎人、寻觅道路；可带难度词如 1-7 突袭、SV-3 磨难
+            stage_index(string): 当关卡名命中多个同名关卡时，用于指定序号（1,2,3...），默认为空
+        """
+        if not bool(self.config.get("akq_enabled", True)):
+            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
+            return
+        if not await self._wait_ready():
+            yield event.make_result().message(self._not_ready_message())
+            return
+
+        stage_name = (stage_name or "").strip()
+        if not stage_name:
+            yield event.make_result().message("博士，请提供要查询的关卡代号或名称，例如：1-7、CE-6、SV-3。")
+            return
+
+        try:
+            # 0) 生息演算地图（sxys.json，COS 下载图片）
+            sxys_path = await self._query_sxys(stage_name)
+            if sxys_path:
+                yield event.make_result().file_image(sxys_path)
+                return
+
+            # 1) 关卡匹配（代号/名称 + 难度）
+            stage_ids, level, level_str = akq_query.search_stage(stage_name)
+            if stage_ids:
+                stage_id = None
+                if len(stage_ids) == 1:
+                    stage_id = stage_ids[0]
+                else:
+                    idx = None
+                    if str(stage_index or "").strip():
+                        try:
+                            idx = int(str(stage_index).strip()) - 1
+                        except ValueError:
+                            idx = None
+                    if idx is not None and 0 <= idx < len(stage_ids):
+                        stage_id = stage_ids[idx]
+                if not stage_id:
+                    # 同名/同代号多关卡：候选列表交给 Agent 转达用户选择
+                    yield self._stage_candidates_text(stage_ids, level_str)
+                    return
+
+                data = self._build_stage_data(stage_id, level, level_str)
+                if not data:
+                    yield event.make_result().message(f"博士，查询关卡「{stage_name}」的资料失败了。")
+                    return
+                width = int(self.config.get("akq_render_width", 1280))
+                timeout = int(self.config.get("akq_render_timeout", 30))
+                path = await _render_to_image("stage.html", data, width, timeout, f"stage_{stage_id}")
+                yield event.make_result().file_image(path)
+                return
+
+            # 2) 活动名匹配 → 活动关卡列表
+            story_name, ss_ids = akq_query.search_side_story(stage_name)
+            if story_name:
+                yield event.make_result().message(self._side_story_list_text(story_name, ss_ids))
+                return
+
+            # 3) 活动列表
+            if "活动" in stage_name:
+                yield event.make_result().message(self._activity_list_text())
+                return
+
+            # 4) 未命中
+            yield (
+                f"本地关卡数据中未找到「{stage_name}」（支持关卡代号如 1-7/CE-6、关卡名如 暴君、活动名）。"
+                "请回复用户：未找到该关卡，请确认关卡代号或名称是否正确，可尝试带上活动名（如「别传 SV-3」）。"
+                "不要用猜测的代号直接重复调用本工具。"
+            )
+        except Exception as e:
+            logger.exception(f"关卡查询渲染失败: {e}")
+            yield event.make_result().message(f"博士，查询关卡「{stage_name}」时出错了：{e}")
+
+    @llm_tool(name="arknights_query_term")
+    async def query_term(self, event: AstrMessageEvent, term_name: str):
+        """查询明日方舟游戏术语/地形说明并直接发送文字结果，如「眩晕」「束缚」「沉睡」「闪避」「干员阻挡」「地形」「草丛」「高台」等。用于回答「XX术语是什么意思」「XX地形有什么用」等问题。
+
+        Args:
+            term_name(string): 术语/地形名称，如 眩晕、束缚、睡莲、草丛
+        """
+        if not bool(self.config.get("akq_enabled", True)):
+            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
+            return
+        if not await self._wait_ready():
+            yield event.make_result().message(self._not_ready_message())
+            return
+
+        term_name = (term_name or "").strip()
+        if not term_name:
+            yield event.make_result().message("博士，请提供要查询的术语名称，例如：眩晕、束缚、草丛。")
+            return
+
+        results = akq_query.search_term(term_name)
+        if not results:
+            yield (
+                f"本地术语库未找到「{term_name}」。请回复用户未找到该术语，并建议换一个说法；"
+                "常见术语示例：眩晕、束缚、沉睡、闪避、位移、地形、草丛、高台。"
+            )
+            return
+
+        text = f"博士，通过【{term_name}】查找到以下术语：\n"
+        for item in results[:12]:
+            text += f"【{item['name']}】\n{item['description']}\n"
+        if len(results) > 12:
+            text += f"\n（共找到 {len(results)} 条，仅显示前 12 条，可换更精确的名称查询）"
+        yield event.make_result().message(text)
+
+    # ------------------------------------------------------------------
+    # 关卡辅助
+    # ------------------------------------------------------------------
+    async def _query_sxys(self, text: str):
+        """生息演算地图：匹配 sxys.json 中的名称并下载 COS 图片，返回本地路径；未命中返回 None。"""
+        sxys_path = os.path.join(PLUGIN_DIR, "sxys.json")
+        if not os.path.exists(sxys_path):
+            return None
+        if self._sxys_maps is None:
+            with open(sxys_path, encoding="utf-8") as f:
+                self._sxys_maps = json.load(f) or {}
+        titles = {}
+        for item, key in self._sxys_maps.items():
+            titles[item] = key
+            titles[remove_punctuation(item, ["-"])] = key
+        best, best_key = "", None
+        for title, key in titles.items():
+            if title and title in text and len(title) > len(best):
+                best, best_key = title, key
+        if not best_key:
+            return None
+        cache_dir = os.path.join(TMP_DIR, "sxys")
+        os.makedirs(cache_dir, exist_ok=True)
+        target = os.path.join(cache_dir, f"{best_key}.jpg")
+        if not os.path.exists(target):
+            try:
+                content = await gamedata._download_url(SXYS_MAP_URL.format(key=best_key))
+                if content:
+                    with open(target, "wb") as f:
+                        f.write(content)
+                else:
+                    return None
+            except Exception as e:
+                logger.warning(f"生息演算地图下载失败 {best_key}: {e}")
+                return None
+        return target
+
+    def _build_stage_data(self, stage_id: str, level: str, level_str: str):
+        """构建 stage.html 渲染数据（对应 Amiya-Bot stages 插件的组装逻辑）。"""
+        stage = GameData.stages.get(stage_id)
+        if not stage:
+            return None
+        res = {
+            **stage,
+            "name": stage["name"] + level_str,
+            "zones": MULTIPLE_ZONE_STAGE.get(stage["code"], 0),
+        }
+        if level == "_easy":
+            main_level = GameData.stages.get(stage_id.replace("easy", "main"))
+            if main_level:
+                res["levelData"] = main_level["levelData"]
+        # 地图缺失时降级到 main 关卡地图（与 Amiya-Bot 一致）
+        if not os.path.exists(os.path.join(GAMEDATA_DIR, "map", f"{res['stageId'].replace('#f#', '')}.png")):
+            res["stageId"] = res["stageId"].replace("tough", "main").replace("easy", "main")
+        # 兜底：缺关卡数据/掉落数据时保证模板不报错
+        ld = res.get("levelData") or {}
+        res["levelData"] = {
+            "options": ld.get("options") or {},
+            "enemyDbRefs": ld.get("enemyDbRefs") or [],
+            "enemiesCount": ld.get("enemiesCount") or {},
+        }
+        res.setdefault("stageDropInfo", {"displayDetailRewards": []})
+        return res
+
+    def _stage_candidates_text(self, stage_ids: list, level_str: str) -> str:
+        lines = ["博士，找到以下同名/同代号关卡，请回复序号查询对应的关卡：\n"]
+        for index, sid in enumerate(stage_ids):
+            stage = GameData.stages.get(sid)
+            if not stage:
+                continue
+            lines.append(f"[{index + 1}] {stage['code']} {stage['name']}{level_str}")
+        return "\n".join(lines)
+
+    def _side_story_list_text(self, story_name: str, stage_ids: list) -> str:
+        lines = [f"博士，以下是活动【{story_name}】的关卡列表：\n|关卡代号|关卡名|关卡代号|关卡名|", "|---|---|---|---|"]
+        for index, sid in enumerate(stage_ids):
+            stage = GameData.stages.get(sid)
+            if not stage:
+                continue
+            code = stage["code"] + ("**突袭**" if stage.get("difficulty") == "FOUR_STAR" else "")
+            name = stage["name"] + ("**（突袭）**" if stage.get("difficulty") == "FOUR_STAR" else "")
+            line = f"|{code}|{name}"
+            if (index + 1) % 2 == 0:
+                line += "|"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _activity_list_text(self) -> str:
+        lines = ["博士，以下是活动列表：\n|活动名|活动名|活动名|活动名|", "|---|---|---|---|"]
+        for index, name in enumerate(reversed(list(GameData.side_story_map.keys()))):
+            lines.append(f"|{name}{'|' if (index + 1) % 4 == 0 else ''}")
+        return "\n".join(lines)
 
     @llm_tool(name="arknights_query_alias")
     async def manage_alias(self, event: AstrMessageEvent, action: str, kind: str, alias: str, name: str = ""):
@@ -468,3 +697,97 @@ class ArknightsQuery(star.Star):
         """查敌人 xxx（需 @ 或唤醒词）"""
         async for r in self._command_query(event, "查敌人", "enemy"):
             yield r
+
+    @filter.command("查关卡")
+    async def cmd_stage(self, event: AstrMessageEvent):
+        """查关卡 xxx（需 @ 或唤醒词）：关卡代号/名称/活动/生息演算地图"""
+        if not bool(self.config.get("akq_enabled", True)):
+            event.stop_event()
+            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
+            return
+        if not await self._wait_ready():
+            event.stop_event()
+            yield event.make_result().message(self._not_ready_message())
+            return
+
+        text = (event.get_message_str() or "").replace("查关卡", "", 1).strip()
+        if not text:
+            event.stop_event()
+            yield event.make_result().message(
+                "博士，请在「查关卡」后面输入要查询的关卡，例如：\n查关卡 1-7\n查关卡 CE-6 突袭\n查关卡 骑兵与猎人"
+            )
+            return
+
+        try:
+            sxys_path = await self._query_sxys(text)
+            if sxys_path:
+                event.stop_event()
+                yield event.make_result().file_image(sxys_path)
+                return
+
+            stage_ids, level, level_str = akq_query.search_stage(text)
+            if stage_ids:
+                stage_id = stage_ids[0] if len(stage_ids) == 1 else None
+                if not stage_id:
+                    event.stop_event()
+                    yield event.make_result().message(self._stage_candidates_text(stage_ids, level_str))
+                    return
+                data = self._build_stage_data(stage_id, level, level_str)
+                if data:
+                    width = int(self.config.get("akq_render_width", 1280))
+                    timeout = int(self.config.get("akq_render_timeout", 30))
+                    path = await _render_to_image("stage.html", data, width, timeout, f"stage_cmd_{stage_id}")
+                    event.stop_event()
+                    yield event.make_result().file_image(path)
+                    return
+
+            story_name, ss_ids = akq_query.search_side_story(text)
+            if story_name:
+                event.stop_event()
+                yield event.make_result().message(self._side_story_list_text(story_name, ss_ids))
+                return
+
+            if "活动" in text:
+                event.stop_event()
+                yield event.make_result().message(self._activity_list_text())
+                return
+
+            event.stop_event()
+            yield event.make_result().message(
+                f"博士，没有找到关卡「{text}」的资料，请确认关卡代号或名称是否正确，可尝试带上活动名（如「别传 SV-3」）。"
+            )
+        except Exception as e:
+            logger.exception(f"命令关卡查询失败: {e}")
+            event.stop_event()
+            yield event.make_result().message(f"博士，查询关卡「{text}」时出错了：{e}")
+
+    @filter.command("查术语")
+    async def cmd_term(self, event: AstrMessageEvent):
+        """查术语 xxx（需 @ 或唤醒词）"""
+        if not bool(self.config.get("akq_enabled", True)):
+            event.stop_event()
+            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
+            return
+        if not await self._wait_ready():
+            event.stop_event()
+            yield event.make_result().message(self._not_ready_message())
+            return
+
+        text = (event.get_message_str() or "").replace("查术语", "", 1).strip()
+        if not text:
+            event.stop_event()
+            yield event.make_result().message("博士，请在「查术语」后面输入术语名称，例如：\n查术语 眩晕")
+            return
+
+        results = akq_query.search_term(text)
+        if not results:
+            event.stop_event()
+            yield event.make_result().message(f"博士，没有找到术语「{text}」的资料，请换一个说法试试～")
+            return
+        msg = f"博士，通过【{text}】查找到以下术语：\n"
+        for item in results[:12]:
+            msg += f"【{item['name']}】\n{item['description']}\n"
+        if len(results) > 12:
+            msg += f"\n（共找到 {len(results)} 条，仅显示前 12 条，可换更精确的名称查询）"
+        event.stop_event()
+        yield event.make_result().message(msg)

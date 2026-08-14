@@ -100,6 +100,7 @@ class GameData:
     materials_made: dict = {}
     materials_source: dict = {}
     material_values: dict = {}  # materialId -> value dict（一图流）
+    term_descriptions: dict = {}  # key -> {'name', 'description'}（术语/地形说明）
 
     ready: bool = False
 
@@ -395,6 +396,18 @@ def init_stages():
     return stage_list, stage_map, side_story_map
 
 
+def init_term_descriptions():
+    """术语/地形说明：gamedata_const.termDescriptionDict + stage_table.tileInfo（移植自 arknights-term-description）。"""
+    data = {}
+    const = JsonData.get_json_data("gamedata_const")
+    for item in const.get("termDescriptionDict", {}).values():
+        data[item["termId"]] = {"name": item["termName"], "description": remove_xml_tag(item["description"])}
+    stage_table = JsonData.get_json_data("stage_table")
+    for item in stage_table.get("tileInfo", {}).values():
+        data[item["tileKey"]] = {"name": item["name"], "description": remove_xml_tag(item["description"])}
+    return data
+
+
 def initialize_data(repo: str = GIT_REPO_DEFAULT, update: bool = True):
     """完整初始化：拉取（可选）→ 解压 → 解析 → 内存数据。"""
     if update or not os.path.exists(os.path.join(GAMEDATA_DIR, "version.txt")):
@@ -427,12 +440,14 @@ def initialize_data(repo: str = GIT_REPO_DEFAULT, update: bool = True):
     GameData.stages, GameData.stages_map, GameData.side_story_map = init_stages()
     GameData.operators, GameData.tokens, GameData.birthday = init_operators()
     GameData.materials, GameData.materials_map, GameData.materials_made, GameData.materials_source = init_materials()
+    GameData.term_descriptions = init_term_descriptions()
 
     JsonData.clear_cache()
     GameData.ready = True
     logger.info(
         f"ArknightsGameData initialize completed: "
-        f"{len(GameData.operators)} operators, {len(GameData.enemies)} enemies, {len(GameData.materials)} materials"
+        f"{len(GameData.operators)} operators, {len(GameData.enemies)} enemies, "
+        f"{len(GameData.materials)} materials, {len(GameData.term_descriptions)} terms"
     )
 
 

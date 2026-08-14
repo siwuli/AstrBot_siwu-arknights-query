@@ -353,3 +353,88 @@ def search_material(text: str):
         return candidates[0]
 
     return find_most_similar(remove_punctuation(text), list(GameData.materials_map.keys()))
+
+
+# ---------------------------------------------------------------------------
+# 关卡
+# ---------------------------------------------------------------------------
+# 难度关键词 → stages_map 的 level 后缀（与 gamedata.init_stages 保持一致）
+STAGE_LEVEL_KEYWORDS = (
+    ("突袭", "_hard", "（突袭）"),
+    ("简单", "_easy", "（剧情）"),
+    ("剧情", "_easy", "（剧情）"),
+    ("困难", "_tough", "（磨难）"),
+    ("磨难", "_tough", "（磨难）"),
+    ("险地", "_sixstar", "（险地）"),
+)
+
+
+def _normalize_stage_key(text: str) -> str:
+    """关卡输入归一化：去标点（保留 -）、转大写、去空格。"""
+    return remove_punctuation(text, ["-"]).upper().replace(" ", "")
+
+
+def search_stage(text: str):
+    """关卡名/代号匹配。返回 (stage_id_list, level, level_str)；未命中返回 (None, level, level_str)。
+
+    匹配规则：先尝试「代号+难度后缀」精确匹配，再尝试 stages_map 全部键（代号/关卡名）
+    的最长包含匹配（最长优先可避免「1-7」误配「10-7」）。如用户在输入中带
+    「突袭/简单/剧情/磨难/险地」等难度词，则优先命中对应难度版本。
+    """
+    text = (text or "").strip()
+    if not text:
+        return None, "", ""
+
+    level, level_str = "", ""
+    for kw, lv, ls in STAGE_LEVEL_KEYWORDS:
+        if kw in text:
+            level, level_str = lv, ls
+            break
+
+    normalized = _normalize_stage_key(text)
+    for kw, _, _ in STAGE_LEVEL_KEYWORDS:
+        normalized = normalized.replace(kw, "")
+
+    stages_map = GameData.stages_map
+    # 1) 精确匹配代号/关卡名（优先带难度后缀）
+    for key in (normalized + level, normalized):
+        if key in stages_map:
+            return stages_map[key], level, level_str
+    # 2) 最长包含匹配
+    best, best_ids = "", None
+    for key, ids in stages_map.items():
+        if key and key in normalized and len(key) > len(best):
+            best, best_ids = key, ids
+    if best:
+        if best + level in stages_map:
+            return stages_map[best + level], level, level_str
+        return best_ids, level, level_str
+    return None, level, level_str
+
+
+def search_side_story(text: str):
+    """活动名匹配（用于「XX活动有哪些关卡」）。返回 (story_name, stage_id_list)；未命中返回 (None, None)。"""
+    text = (text or "").strip()
+    if not text:
+        return None, None
+    normalized = _normalize_stage_key(text)
+    for kw, _, _ in STAGE_LEVEL_KEYWORDS:
+        normalized = normalized.replace(kw, "")
+    for name in GameData.side_story_map:
+        n = _normalize_stage_key(name)
+        if n and (n == normalized or n in normalized):
+            return name, list(GameData.side_story_map[name].keys())
+    return None, None
+
+
+def search_term(text: str):
+    """术语名匹配（名称包含）。返回术语列表（{'name','description'}）。"""
+    text = (text or "").strip().lower()
+    if not text:
+        return []
+    result = []
+    for item in GameData.term_descriptions.values():
+        name = item["name"].lower()
+        if text == name or text in name:
+            result.append(item)
+    return result
