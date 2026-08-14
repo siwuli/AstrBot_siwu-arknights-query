@@ -15,6 +15,7 @@ Agent 工具：
 import asyncio
 import logging
 import os
+import re
 
 from astrbot.api import star
 from astrbot.api.all import (
@@ -23,6 +24,7 @@ from astrbot.api.all import (
     llm_tool,
 )
 from astrbot.api.event import filter
+from astrbot.api.provider import ProviderRequest
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from . import aliases as akq_aliases
@@ -49,6 +51,25 @@ QUERY_TYPE_HINT = {
     "skills": "技能详情",
     "tokens": "召唤物",
 }
+
+# 查询意图关键词（Agent 强制工具调用钩子使用）：命中则认为用户在做明日方舟数据查询。
+QUERY_INTENT_RE = re.compile(
+    r"查|查询|专精|技能|召唤物|材料|干员|敌人|敌方|怎么打|哪里刷|数据|资料|属性",
+    re.I,
+)
+
+# 注入到 LLM 请求的强制指令（位于系统提示词末尾，优先级最高）。
+# 目的：让 Agent 在收到查询请求时"必须通过查询工具发送图片"，而不是只回文字；
+# 当查询工具返回"未找到"引导时，必须按引导执行「联网搜索 → 登记代号 → 查询出图」三步。
+FORCE_QUERY_TOOL_PROMPT = """\
+[明日方舟查询任务指令]
+用户正在请求查询明日方舟数据（干员/材料/敌方单位）。本机器人提供 arknights_query_operator、
+arknights_query_material、arknights_query_enemy 三个查询工具，它们会自动生成资料图片并发送给用户。
+你必须调用对应查询工具完成查询并让工具发送图片，不要只回复文字、不要自行编造数据。
+如果查询工具返回"本地未找到"的引导，请严格按引导执行：第1步调用 web_search_tavily 确认官方名称，
+第2步调用 arknights_query_alias 登记代号，第3步调用查询工具（传官方名称）出图。
+调用查询工具是完成本任务的唯一正确方式，请立即执行。\
+"""
 
 
 def _template(name: str) -> str:
@@ -144,6 +165,34 @@ class ArknightsQuery(star.Star):
     # ------------------------------------------------------------------
     # Agent 工具
     # ------------------------------------------------------------------
+    @filter.on_llm_request()
+    async def force_agent_query_tool(
+        self, event: AstrMessageEvent, req: ProviderRequest
+    ) -> None:
+        """检测到明日方舟查询意图时，强制 Agent 调用查询工具出图。
+
+        部分模型（如 mimo）收到查询请求时倾向于只回复文字、或收到"未找到"引导后
+        跳过工具调用。此钩子在 LLM 请求发出前拦截：
+        1) 在系统提示词末尾追加强制指令（位于安全提示词之后，优先级更高）；
+        2) 确保三个查询工具在本请求的工具列表中。
+        """
+        if not bool(self.config.get("akq_enabled", True)):
+            return
+        text = event.get_message_str() or ""
+        if not QUERY_INTENT_RE.search(text):
+            return
+
+        # 1) 系统提示词追加强制指令
+        req.system_prompt = f"{req.system_prompt}\n\n{FORCE_QUERY_TOOL_PROMPT}"
+
+        # 2) 确保查询工具在本次请求中可用
+        if req.func_tool is not None:
+            manager = self.context.get_llm_tool_manager()
+            for tool_name in ("arknights_query_operator", "arknights_query_material", "arknights_query_enemy"):
+                tool = manager.get_func(tool_name)
+                if tool:
+                    req.func_tool.add_tool(tool)
+
     @llm_tool(name="arknights_query_operator")
     async def query_operator(self, event: AstrMessageEvent, operator_name: str, query_type: str = "info"):
         """查询明日方舟干员资料并发送图片。干员资料包括：干员详情（星级/职业/天赋/技能/属性/档案）、精英化与专精材料、技能详情、召唤物信息。请根据用户意图选择合适的 query_type；未明确时用 info。若用户输入未命中本地数据（可能是社区代号/外号，如 夏游洁 指 予愿安洁莉娜），本工具会提示你联网确认并登记代号后再查询。
@@ -162,7 +211,8 @@ class ArknightsQuery(star.Star):
         # Agent 路径不信任相似度匹配（社区外号易误匹配），未命中交给 LLM 判断
         name = akq_query.search_operator(operator_name, use_similar=False)
         if not name:
-            yield event.make_result().message(self._alias_miss_message("operator", operator_name))
+            # 必须 yield 字符串作为工具返回值，Agent 才能读到三步引导（不能只发用户消息）
+            yield self._alias_miss_message("operator", operator_name)
             return
 
         query_type = (query_type or "info").strip().lower()
