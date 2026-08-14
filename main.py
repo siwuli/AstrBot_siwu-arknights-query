@@ -19,7 +19,6 @@ import asyncio
 import json
 import logging
 import os
-import platform
 import re
 
 from astrbot.api import star
@@ -30,7 +29,7 @@ from astrbot.api.all import (
 )
 from astrbot.api.event import filter
 from astrbot.api.provider import ProviderRequest
-from astrbot.core.message.components import Image
+from astrbot.core.message.components import Image, Reply
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from . import aliases as akq_aliases
@@ -500,11 +499,11 @@ class ArknightsQuery(star.Star):
             return
 
         text = (tags_text or "").strip()
-        # 用户发送了公招截图但没给标签文本时，自动 OCR 识别图中标签
-        if not text:
-            ocr_text = await self._ocr_event_image(event)
-            if ocr_text:
-                text = ocr_text
+        # 用户发送了公招截图（含引用截图）时，优先 OCR 识别图中标签，
+        # 并与 LLM 转述的标签合并——避免 SubAgent 委派/转述过程中丢失标签
+        ocr_text = await self._ocr_event_image(event)
+        if ocr_text:
+            text = f"{ocr_text} {text}".strip()
 
         tags, max_rarity = akq_recruit.parse_tags(text)
         if not tags:
@@ -546,15 +545,32 @@ class ArknightsQuery(star.Star):
     # 公招 OCR 辅助
     # ------------------------------------------------------------------
     async def _ocr_event_image(self, event: AstrMessageEvent) -> str:
-        """从事件中取第一张图片，用本地 Windows OCR（Windows.Media.Ocr.Cli.exe）识别文字。
+        """从事件消息中取第一张图片，用本地 Windows OCR（Windows.Media.Ocr.Cli.exe）识别文字。
 
+        同时遍历引用消息（Reply.chain），保证用户「引用之前截图」时也能识别到图中标签。
         仅 Windows 10+ 且 OCR 工具存在时生效，识别失败返回空串（不阻塞公招文字查询）。
         """
+
+        def _iter_images(comp):
+            if isinstance(comp, Image):
+                yield comp
+            elif isinstance(comp, Reply) and comp.chain:
+                # Reply.chain 可能是 MessageChain 或 list，统一取组件列表
+                sub_chain = getattr(comp.chain, "chain", None)
+                if sub_chain is None:
+                    sub_chain = comp.chain
+                for sub in sub_chain:
+                    yield from _iter_images(sub)
+
         try:
+            # event.message 是 MessageChain（组件存在 .chain），需取其组件列表遍历
+            msg_chain = getattr(event.message, "chain", None)
+            if msg_chain is None:
+                msg_chain = event.message
             image_comp = None
-            for comp in event.message:
-                if isinstance(comp, Image):
-                    image_comp = comp
+            for comp in msg_chain:
+                image_comp = next(_iter_images(comp), None)
+                if image_comp is not None:
                     break
             if image_comp is None:
                 return ""
@@ -562,7 +578,9 @@ class ArknightsQuery(star.Star):
             if not img_path or not os.path.exists(img_path):
                 return ""
             exe_path = os.path.join(PLUGIN_DIR, "tools", "Windows.Media.Ocr.Cli.exe")
-            if not (os.path.exists(exe_path) and platform.release() == "10"):
+            # OCR 工具是 Windows 专用，存在即可用（不要判断 platform.release()=="10"，
+            # Windows 11 返回 "11" 会导致 OCR 被永久跳过）
+            if not os.path.exists(exe_path):
                 return ""
             proc = await asyncio.create_subprocess_exec(
                 exe_path,
