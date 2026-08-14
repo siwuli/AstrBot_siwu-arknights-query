@@ -110,6 +110,14 @@ FORCE_QUERY_TOOL_PROMPT = """\
 调用查询工具是完成本任务的唯一正确方式，请立即执行。\
 """
 
+# 查询工具成功发送结果后返回给 Agent 的完成提示。
+# 若不返回（工具直接发送）AstrBot 会提示「没有返回值」，Agent 会误以为工具失败，
+# 从而自行补充一段文字回复（与已发送的图片/文字重复，甚至误报"工具挂了"）。
+TOOL_DONE_PROMPT = (
+    "查询已完成，结果图片/文字已直接发送给用户。"
+    "请勿重复发送、复述或总结图片中的内容，本轮直接简短收尾即可（甚至可以不再输出文字）。"
+)
+
 
 def _template(name: str) -> str:
     return os.path.join(TEMPLATE_DIR, name)
@@ -298,6 +306,7 @@ class ArknightsQuery(star.Star):
             tag = f"operator_{query_type}_{name}"
             path = await _render_to_image(template, data, width, timeout, tag)
             yield event.make_result().file_image(path)
+            yield TOOL_DONE_PROMPT
         except Exception as e:
             logger.exception(f"干员查询渲染失败: {e}")
             yield event.make_result().message(f"博士，查询干员「{name}」时出错了：{e}")
@@ -332,6 +341,7 @@ class ArknightsQuery(star.Star):
             timeout = int(self.config.get("akq_render_timeout", 30))
             path = await _render_to_image("material.html", data, width, timeout, f"material_{name}")
             yield event.make_result().file_image(path)
+            yield TOOL_DONE_PROMPT
         except Exception as e:
             logger.exception(f"材料查询渲染失败: {e}")
             yield event.make_result().message(f"博士，查询材料「{name}」时出错了：{e}")
@@ -366,6 +376,7 @@ class ArknightsQuery(star.Star):
             timeout = int(self.config.get("akq_render_timeout", 30))
             path = await _render_to_image("enemy.html", data, width, timeout, f"enemy_{name}")
             yield event.make_result().file_image(path)
+            yield TOOL_DONE_PROMPT
         except Exception as e:
             logger.exception(f"敌方单位查询渲染失败: {e}")
             yield event.make_result().message(f"博士，查询敌方单位「{name}」时出错了：{e}")
@@ -397,6 +408,7 @@ class ArknightsQuery(star.Star):
             sxys_path = await self._query_sxys(stage_name)
             if sxys_path:
                 yield event.make_result().file_image(sxys_path)
+                yield TOOL_DONE_PROMPT
                 return
 
             # 1) 关卡匹配（代号/名称 + 难度）
@@ -427,17 +439,20 @@ class ArknightsQuery(star.Star):
                 timeout = int(self.config.get("akq_render_timeout", 30))
                 path = await _render_to_image("stage.html", data, width, timeout, f"stage_{stage_id}")
                 yield event.make_result().file_image(path)
+                yield TOOL_DONE_PROMPT
                 return
 
             # 2) 活动名匹配 → 活动关卡列表
             story_name, ss_ids = akq_query.search_side_story(stage_name)
             if story_name:
                 yield event.make_result().message(self._side_story_list_text(story_name, ss_ids))
+                yield TOOL_DONE_PROMPT
                 return
 
             # 3) 活动列表
             if "活动" in stage_name:
                 yield event.make_result().message(self._activity_list_text())
+                yield TOOL_DONE_PROMPT
                 return
 
             # 4) 未命中
@@ -483,6 +498,7 @@ class ArknightsQuery(star.Star):
         if len(results) > 12:
             text += f"\n（共找到 {len(results)} 条，仅显示前 12 条，可换更精确的名称查询）"
         yield event.make_result().message(text)
+        yield TOOL_DONE_PROMPT
 
     @llm_tool(name="arknights_query_recruit")
     async def query_recruit(self, event: AstrMessageEvent, tags_text: str = ""):
@@ -537,6 +553,7 @@ class ArknightsQuery(star.Star):
             result.message(akq_recruit.summarize(groups, tags, max_rarity))
             result.file_image(path)
             yield result
+            yield TOOL_DONE_PROMPT
         except Exception as e:
             logger.exception(f"公招查询渲染失败: {e}")
             yield event.make_result().message(f"博士，查询公招组合时出错了：{e}")
