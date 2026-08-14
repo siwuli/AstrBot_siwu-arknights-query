@@ -10,7 +10,7 @@ Agent 工具：
     - arknights_query_enemy:    查询敌方单位资料
     - arknights_query_stage:    查询关卡（地图/敌人/掉落/生息演算地图）
     - arknights_query_term:     查询术语/地形说明
-    - arknights_query_recruit:  公招标签组合推荐（推荐语+组合图，支持截图 OCR）
+    - arknights_query_recruit:  公招标签组合推荐（推荐语+组合图，支持截图视觉模型识别）
 命令回退（需 @ 或唤醒词）：
     - 查干员 xxx / 查材料 xxx / 查敌人 xxx / 查关卡 xxx / 查术语 xxx / 查公招 xxx
 """
@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import uuid
 
 from astrbot.api import star
 from astrbot.api.all import (
@@ -117,6 +118,16 @@ TOOL_DONE_PROMPT = (
     "查询已完成，结果图片/文字已直接发送给用户。"
     "请勿重复发送、复述或总结图片中的内容，本轮直接简短收尾即可（甚至可以不再输出文字）。"
 )
+
+# 公招截图标签识别提示词（视觉模型）。重点：逐格查看、全部列出、禁止只挑几个。
+RECRUIT_VISION_PROMPT = """这是一张《明日方舟》公开招募(公招)界面的截图，图中包含若干招募标签（如：近战位、远程位、先锋、近卫、重装、狙击、医疗、辅助、术师、特种、资深干员、高级资深干员、控场、爆发、支援、支援机械、削弱、快速复活、位移、召唤、生存、防护、群攻、治疗、输出、费用回复、减速、牵制、元素 等）。
+
+请逐行逐格、从左到右从上到下仔细查看截图中的【每一个】标签，列出图中出现的【所有】标签，一个都不能遗漏。
+
+要求：
+1. 截图里所有标签必须全部列出，不要只挑醒目的或你认识的，也不要忽略小字标签；
+2. 每个标签只输出名称本身，不要附加任何解释；
+3. 用中文顿号（、）分隔输出，只输出标签列表，不要输出任何其他内容。"""
 
 
 def _template(name: str) -> str:
@@ -515,11 +526,12 @@ class ArknightsQuery(star.Star):
             return
 
         text = (tags_text or "").strip()
-        # 用户发送了公招截图（含引用截图）时，优先 OCR 识别图中标签，
+        # 用户发送了公招截图（含引用截图）时，用视觉模型识别图中标签，
         # 并与 LLM 转述的标签合并——避免 SubAgent 委派/转述过程中丢失标签
-        ocr_text = await self._ocr_event_image(event)
-        if ocr_text:
-            text = f"{ocr_text} {text}".strip()
+        if bool(self.config.get("akq_vision_enabled", True)):
+            caption_text = await self._caption_event_image(event)
+            if caption_text:
+                text = f"{caption_text} {text}".strip()
 
         tags, max_rarity = akq_recruit.parse_tags(text)
         if not tags:
@@ -559,14 +571,11 @@ class ArknightsQuery(star.Star):
             yield event.make_result().message(f"博士，查询公招组合时出错了：{e}")
 
     # ------------------------------------------------------------------
-    # 公招 OCR 辅助
+    # 公招截图标签识别（视觉模型）
     # ------------------------------------------------------------------
-    async def _ocr_event_image(self, event: AstrMessageEvent) -> str:
-        """从事件消息中取第一张图片，用本地 Windows OCR（Windows.Media.Ocr.Cli.exe）识别文字。
-
-        同时遍历引用消息（Reply.chain），保证用户「引用之前截图」时也能识别到图中标签。
-        仅 Windows 10+ 且 OCR 工具存在时生效，识别失败返回空串（不阻塞公招文字查询）。
-        """
+    def _find_event_image(self, event: AstrMessageEvent):
+        """从事件消息中取第一张图片，同时遍历引用消息（Reply.chain），
+        保证用户「引用之前截图」时也能拿到图片。无图返回 None。"""
 
         def _iter_images(comp):
             if isinstance(comp, Image):
@@ -579,40 +588,67 @@ class ArknightsQuery(star.Star):
                 for sub in sub_chain:
                     yield from _iter_images(sub)
 
-        try:
-            # event.message 是 MessageChain（组件存在 .chain），需取其组件列表遍历
-            msg_chain = getattr(event.message, "chain", None)
-            if msg_chain is None:
-                msg_chain = event.message
-            image_comp = None
-            for comp in msg_chain:
-                image_comp = next(_iter_images(comp), None)
-                if image_comp is not None:
-                    break
-            if image_comp is None:
-                return ""
-            img_path = await image_comp.convert_to_file_path()
-            if not img_path or not os.path.exists(img_path):
-                return ""
-            exe_path = os.path.join(PLUGIN_DIR, "tools", "Windows.Media.Ocr.Cli.exe")
-            # OCR 工具是 Windows 专用，存在即可用（不要判断 platform.release()=="10"，
-            # Windows 11 返回 "11" 会导致 OCR 被永久跳过）
-            if not os.path.exists(exe_path):
-                return ""
-            proc = await asyncio.create_subprocess_exec(
-                exe_path,
-                img_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
+        # event.message 是 MessageChain（组件存在 .chain），需取其组件列表遍历
+        msg_chain = getattr(event.message, "chain", None)
+        if msg_chain is None:
+            msg_chain = event.message
+        for comp in msg_chain:
+            image_comp = next(_iter_images(comp), None)
+            if image_comp is not None:
+                return image_comp
+        return None
+
+    async def _caption_event_image(self, event: AstrMessageEvent) -> str:
+        """从事件消息中取第一张图片（含引用消息），调用视觉模型识别公招标签。
+
+        识别失败或没有图片时返回空串（不阻塞公招文字查询）。提示词见
+        RECRUIT_VISION_PROMPT，重点要求「全部标签一个不漏」，防止只识别出其中几个。
+        """
+        image_comp = self._find_event_image(event)
+        if image_comp is None:
+            return ""
+        img_ref = image_comp.url or image_comp.file
+        if not img_ref:
             try:
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-            except asyncio.TimeoutError:
-                proc.kill()
+                img_ref = await image_comp.convert_to_file_path()
+            except Exception:
                 return ""
-            return (stdout or b"").decode("utf-8", errors="ignore").replace("\n", "")
+        if not img_ref:
+            return ""
+
+        try:
+            # 1) 优先使用配置的视觉模型 Provider；留空则回退到全局
+            #    image_caption_provider_id（面板已配置时无需再改插件配置）
+            prov_id = self.config.get("akq_vision_provider_id", "")
+            if not prov_id:
+                try:
+                    cfg = self.context.get_config()
+                    prov_id = (
+                        cfg.get("provider_ltm_settings", {})
+                        .get("image_caption_provider_id", "")
+                        or ""
+                    )
+                except Exception:
+                    prov_id = ""
+            provider = None
+            if prov_id:
+                provider = self.context.get_provider_by_id(prov_id)
+            if provider is None:
+                provider = await self.context.get_using_provider_async()
+            if provider is None:
+                logger.warning("未找到可用的视觉模型 Provider，跳过公招截图识别")
+                return ""
+            resp = await provider.text_chat(
+                prompt=RECRUIT_VISION_PROMPT,
+                session_id=uuid.uuid4().hex,
+                image_urls=[img_ref],
+                persist=False,
+            )
+            text = (resp.completion_text or "").strip()
+            logger.info(f"公招截图视觉模型识别结果: {text}")
+            return text
         except Exception as e:
-            logger.warning(f"公招图片 OCR 失败: {e}")
+            logger.warning(f"公招截图视觉模型识别失败: {e}")
             return ""
 
     # ------------------------------------------------------------------
@@ -961,14 +997,14 @@ class ArknightsQuery(star.Star):
 
         text = (event.get_message_str() or "").replace("查公招", "", 1).strip()
         if not text:
-            ocr_text = await self._ocr_event_image(event)
-            if not ocr_text:
+            caption_text = await self._caption_event_image(event)
+            if not caption_text:
                 event.stop_event()
                 yield event.make_result().message(
                     "博士，请在「查公招」后输入公招标签（例如：查公招 生存防护），或发送公招界面截图。"
                 )
                 return
-            text = ocr_text
+            text = caption_text
 
         tags, max_rarity = akq_recruit.parse_tags(text)
         if not tags:

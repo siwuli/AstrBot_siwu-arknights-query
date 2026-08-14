@@ -34,5 +34,17 @@
     "hint": "浏览器截图整体超时，防止长时间挂起",
     "type": "int",
     "default": 30
+  },
+  "akq_vision_enabled": {
+    "description": "公招截图标签识别（视觉模型）",
+    "hint": "开启后，用户发送公招截图（或引用之前截图）时自动调用视觉模型识别图中全部标签，并与文字转述合并，防止只计算其中几个标签",
+    "type": "bool",
+    "default": true
+  },
+  "akq_vision_provider_id": {
+    "description": "视觉模型 Provider ID",
+    "hint": "用于识别公招截图的视觉模型（如 siliconflow/Qwen/Qwen3-VL-32B-Instruct）。留空则自动使用全局配置的图片描述 Provider（provider_ltm_settings.image_caption_provider_id），再留空则用当前默认 Provider",
+    "type": "string",
+    "default": ""
   }
 }
