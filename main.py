@@ -10,14 +10,16 @@ Agent 工具：
     - arknights_query_enemy:    查询敌方单位资料
     - arknights_query_stage:    查询关卡（地图/敌人/掉落/生息演算地图）
     - arknights_query_term:     查询术语/地形说明
+    - arknights_query_recruit:  公招标签组合推荐（推荐语+组合图，支持截图 OCR）
 命令回退（需 @ 或唤醒词）：
-    - 查干员 xxx / 查材料 xxx / 查敌人 xxx / 查关卡 xxx / 查术语 xxx
+    - 查干员 xxx / 查材料 xxx / 查敌人 xxx / 查关卡 xxx / 查术语 xxx / 查公招 xxx
 """
 
 import asyncio
 import json
 import logging
 import os
+import platform
 import re
 
 from astrbot.api import star
@@ -28,11 +30,13 @@ from astrbot.api.all import (
 )
 from astrbot.api.event import filter
 from astrbot.api.provider import ProviderRequest
+from astrbot.core.message.components import Image
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from . import aliases as akq_aliases
 from . import gamedata
 from . import query as akq_query
+from . import recruit as akq_recruit
 from . import render as akq_render
 from .gamedata import GAMEDATA_DIR, GameData
 from .utils import remove_punctuation
@@ -64,7 +68,7 @@ QUERY_TYPE_HINT = {
 
 # 查询意图关键词（Agent 强制工具调用钩子使用）：命中则认为用户在请求明日方舟数据查询。
 QUERY_INTENT_RE = re.compile(
-    r"查|查询|专精|技能|召唤物|材料|干员|敌人|敌方|怎么打|哪里刷|数据|资料|属性|关卡|地图|术语|地形|活动|突袭|磨难",
+    r"查|查询|专精|技能|召唤物|材料|干员|敌人|敌方|怎么打|哪里刷|数据|资料|属性|关卡|地图|术语|地形|活动|突袭|磨难|公招|招募",
     re.I,
 )
 
@@ -79,11 +83,13 @@ FORCE_QUERY_TOOL_PROMPT = """\
 - arknights_query_enemy：敌方单位资料，自动发送图片
 - arknights_query_stage：关卡资料（地图/敌方单位/掉落/生息演算地图），单个关卡自动发送图片，同名多关卡或活动列表返回文字
 - arknights_query_term：术语/地形说明，返回文字
+- arknights_query_recruit：公开招募（公招）标签组合推荐，自动发送「推荐语+组合图」（含可锁定干员与最高稀有度）；用户发送公招界面截图时也会自动识别图中标签
 
 执行规则（必须严格遵守）：
 1.【第一步必须调用查询工具】把用户消息中出现的名称【原样】作为参数调用对应查询工具
    （干员→arknights_query_operator，敌方→arknights_query_enemy，材料→arknights_query_material，
-   关卡/地图/活动→arknights_query_stage，术语/地形→arknights_query_term）。
+   关卡/地图/活动→arknights_query_stage，术语/地形→arknights_query_term，
+   公招/招募→arknights_query_recruit，标签文本原样传入）。
    禁止先联网搜索、禁止直接文字回答。
 2.【名称原样传参】用户明确给出名称就原样传入（如用户说"大哥"就传"大哥"，说"1-7 突袭"就传"1-7 突袭"，
    说"奎隆这关的地图"就传"奎隆"），不要自行联想、翻译、替换成其他名称
@@ -229,6 +235,7 @@ class ArknightsQuery(star.Star):
                 "arknights_query_enemy",
                 "arknights_query_stage",
                 "arknights_query_term",
+                "arknights_query_recruit",
             ):
                 tool = manager.get_func(tool_name)
                 if tool:
@@ -477,6 +484,101 @@ class ArknightsQuery(star.Star):
         if len(results) > 12:
             text += f"\n（共找到 {len(results)} 条，仅显示前 12 条，可换更精确的名称查询）"
         yield event.make_result().message(text)
+
+    @llm_tool(name="arknights_query_recruit")
+    async def query_recruit(self, event: AstrMessageEvent, tags_text: str = ""):
+        """查询明日方舟公开招募（公招）标签组合推荐并发送「推荐语+组合图」。用于回答「公招」「帮我看看这几个标签」「生存防护怎么选」「高资 公招」「近战 生存 快速复活」等公招相关请求。用户发来公招界面截图时（即使不带标签文字），也必须调用本工具，工具会自动识别截图中的标签。注意：标签文本请【原样】传入，不要自行增删改；工具会自己判断标签有效性并给出推荐组合，若识别出多个标签会推荐最优组合（最高稀有度）。
+
+        Args:
+            tags_text(string): 公招标签文本，用户原样提供的标签或粘贴的标签组合，如 "生存防护"、"近战 生存"、"资深 快速复活"、"高资 群攻 输出"；用户仅发截图时可留空
+        """
+        if not bool(self.config.get("akq_enabled", True)):
+            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
+            return
+        if not await self._wait_ready():
+            yield event.make_result().message(self._not_ready_message())
+            return
+
+        text = (tags_text or "").strip()
+        # 用户发送了公招截图但没给标签文本时，自动 OCR 识别图中标签
+        if not text:
+            ocr_text = await self._ocr_event_image(event)
+            if ocr_text:
+                text = ocr_text
+
+        tags, max_rarity = akq_recruit.parse_tags(text)
+        if not tags:
+            yield (
+                f"从「{text or '(无文字)'}」中未识别出有效的公招标签。请回复用户：请提供公招标签"
+                "（如 生存、防护、近战位、治疗、高资 等）或直接发送公招界面截图。"
+            )
+            return
+
+        try:
+            groups = akq_recruit.build_groups(tags, max_rarity)
+            if groups is None:
+                yield f"无法查询到标签【{'、'.join(tags)}】所拥有的稀有干员，请回复用户让 TA 确认标签是否正确。"
+                return
+            if not groups:
+                yield (
+                    f"根据标签【{'、'.join(tags)}】没有找到可以锁定稀有干员的组合。"
+                    "请回复用户：建议提供更多标签（如 生存 防护 近战位），或发送公招界面截图。"
+                )
+                return
+
+            data = {"groups": groups, "tags": tags}
+            width = int(self.config.get("akq_render_width", 1280))
+            timeout = int(self.config.get("akq_render_timeout", 30))
+            path = await _render_to_image(
+                "operatorRecruit.html", data, width, timeout, f"recruit_{'_'.join(tags)}"
+            )
+
+            # 「AI 说话 + 图」：一条消息链同时携带推荐语文字与组合图
+            result = event.make_result()
+            result.message(akq_recruit.summarize(groups, tags, max_rarity))
+            result.file_image(path)
+            yield result
+        except Exception as e:
+            logger.exception(f"公招查询渲染失败: {e}")
+            yield event.make_result().message(f"博士，查询公招组合时出错了：{e}")
+
+    # ------------------------------------------------------------------
+    # 公招 OCR 辅助
+    # ------------------------------------------------------------------
+    async def _ocr_event_image(self, event: AstrMessageEvent) -> str:
+        """从事件中取第一张图片，用本地 Windows OCR（Windows.Media.Ocr.Cli.exe）识别文字。
+
+        仅 Windows 10+ 且 OCR 工具存在时生效，识别失败返回空串（不阻塞公招文字查询）。
+        """
+        try:
+            image_comp = None
+            for comp in event.message:
+                if isinstance(comp, Image):
+                    image_comp = comp
+                    break
+            if image_comp is None:
+                return ""
+            img_path = await image_comp.convert_to_file_path()
+            if not img_path or not os.path.exists(img_path):
+                return ""
+            exe_path = os.path.join(PLUGIN_DIR, "tools", "Windows.Media.Ocr.Cli.exe")
+            if not (os.path.exists(exe_path) and platform.release() == "10"):
+                return ""
+            proc = await asyncio.create_subprocess_exec(
+                exe_path,
+                img_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                proc.kill()
+                return ""
+            return (stdout or b"").decode("utf-8", errors="ignore").replace("\n", "")
+        except Exception as e:
+            logger.warning(f"公招图片 OCR 失败: {e}")
+            return ""
 
     # ------------------------------------------------------------------
     # 关卡辅助
@@ -809,3 +911,59 @@ class ArknightsQuery(star.Star):
             msg += f"\n（共找到 {len(results)} 条，仅显示前 12 条，可换更精确的名称查询）"
         event.stop_event()
         yield event.make_result().message(msg)
+
+    @filter.command("查公招")
+    async def cmd_recruit(self, event: AstrMessageEvent):
+        """查公招 标签组合（需 @ 或唤醒词）：支持文字标签与公招截图识别"""
+        if not bool(self.config.get("akq_enabled", True)):
+            event.stop_event()
+            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
+            return
+        if not await self._wait_ready():
+            event.stop_event()
+            yield event.make_result().message(self._not_ready_message())
+            return
+
+        text = (event.get_message_str() or "").replace("查公招", "", 1).strip()
+        if not text:
+            ocr_text = await self._ocr_event_image(event)
+            if not ocr_text:
+                event.stop_event()
+                yield event.make_result().message(
+                    "博士，请在「查公招」后输入公招标签（例如：查公招 生存防护），或发送公招界面截图。"
+                )
+                return
+            text = ocr_text
+
+        tags, max_rarity = akq_recruit.parse_tags(text)
+        if not tags:
+            event.stop_event()
+            yield event.make_result().message(
+                f"博士，没有从「{text}」中识别出有效的公招标签，请提供如 生存、防护、近战位、高资 等标签～"
+            )
+            return
+
+        try:
+            groups = akq_recruit.build_groups(tags, max_rarity)
+            if not groups:
+                event.stop_event()
+                yield event.make_result().message(
+                    f"博士，根据标签【{'、'.join(tags)}】没有找到可以锁定稀有干员的组合，建议提供更多标签再试试～"
+                )
+                return
+
+            data = {"groups": groups, "tags": tags}
+            width = int(self.config.get("akq_render_width", 1280))
+            timeout = int(self.config.get("akq_render_timeout", 30))
+            path = await _render_to_image(
+                "operatorRecruit.html", data, width, timeout, f"recruit_cmd_{'_'.join(tags)}"
+            )
+            result = event.make_result()
+            result.message(akq_recruit.summarize(groups, tags, max_rarity))
+            result.file_image(path)
+            event.stop_event()
+            yield result
+        except Exception as e:
+            logger.exception(f"命令公招查询失败: {e}")
+            event.stop_event()
+            yield event.make_result().message(f"博士，查询公招组合时出错了：{e}")
