@@ -23,11 +23,14 @@ ASTRBOT_DIR = os.path.dirname(PLUGIN_DIR)  # plugins/astrbot
 PLUGIN_SLUG = 'siwu-arknights-query'
 
 # 打包时排除的文件/目录
+# data/ 为运行时本地缓存（gamedata 仓库等，插件激活时会自动从 gitee 拉取，
+# 无需随包分发，避免 zip 体积膨胀到 GB 级）
 EXCLUDE_NAMES = {
     os.path.basename(__file__),  # build.py 自身
     '__pycache__',
     '.git',
     '.gitignore',
+    'data',
 }
 
 
