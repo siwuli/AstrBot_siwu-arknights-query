@@ -1,0 +1,38 @@
+{
+  "akq_enabled": {
+    "description": "启用明日方舟查询",
+    "hint": "关闭后，明日方舟相关的 Agent 工具与查询命令将不再响应",
+    "type": "bool",
+    "default": true
+  },
+  "akq_auto_update": {
+    "description": "启动时自动拉取/更新游戏数据",
+    "hint": "开启后，插件加载时会自动从 gitee 拉取最新 gamedata（首次拉取需较长时间）。关闭则使用本地已有数据",
+    "type": "bool",
+    "default": true
+  },
+  "akq_repo_url": {
+    "description": "游戏数据仓库地址",
+    "hint": "Amiya-Bot 官方 gamedata 数据源，一般无需修改",
+    "type": "string",
+    "default": "https://gitee.com/amiya-bot/amiya-bot-assets.git"
+  },
+  "akq_auto_fetch_material_value": {
+    "description": "自动拉取材料价值数据",
+    "hint": "开启后，加载时从一图流（yituliu.cn）拉取材料价值数据，用于材料查询页显示推荐价值",
+    "type": "bool",
+    "default": true
+  },
+  "akq_render_width": {
+    "description": "渲染图片宽度（px）",
+    "hint": "HTML 模板为 1280px 固定画布，无需修改",
+    "type": "int",
+    "default": 1280
+  },
+  "akq_render_timeout": {
+    "description": "渲染超时时间（秒）",
+    "hint": "浏览器截图整体超时，防止长时间挂起",
+    "type": "int",
+    "default": 30
+  }
+}

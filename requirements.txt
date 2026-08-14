@@ -1,0 +1,4 @@
+# HTML 模板截图出图（复用 Amiya-Bot 模板，Playwright + Chromium）
+# 版本须与本机 ms-playwright 浏览器内核匹配（chromium-1179）
+playwright==1.53.0
+# 安装 Chromium：python -m playwright install chromium
