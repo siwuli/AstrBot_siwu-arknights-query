@@ -26,9 +26,6 @@ SPECIAL_WORDS = ["高级资深干员", "高级资深", "高资", "资深干员",
 # 口语缩写 → 标准标签
 ABBREV_TAGS = {"近战": "近战位", "远程": "远程位"}
 
-# 组合图最多展示的组合数（标签多时组合数可到十几个，图会超高导致聊天平台显示不全）
-MAX_GROUPS = 6
-
 _tags_cache = None
 _tags_cache_signature = None
 
@@ -184,8 +181,7 @@ def build_groups(tags: list, max_rarity: int):
     if not groups:
         return []
 
-    groups = sorted(groups, key=lambda n: (-len(n["tags"]), -n["max_rarity"]))
-    return groups[:MAX_GROUPS]
+    return sorted(groups, key=lambda n: (-len(n["tags"]), -n["max_rarity"]))
 
 
 def summarize(groups: list, tags: list, max_rarity: int) -> str:
