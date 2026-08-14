@@ -27,6 +27,7 @@ from astrbot.api import star
 from astrbot.api.all import (
     AstrBotConfig,
     AstrMessageEvent,
+    MessageChain,
     llm_tool,
 )
 from astrbot.api.event import filter
@@ -320,8 +321,10 @@ class ArknightsQuery(star.Star):
             timeout = int(self.config.get("akq_render_timeout", 30))
             tag = f"operator_{query_type}_{name}"
             path = await _render_to_image(template, data, width, timeout, tag)
-            # 资料图片直接发送给用户（LLM 无法展示图片），同时返回简短摘要供 Agent 收尾
-            yield event.make_result().file_image(path)
+            # 资料图片直发用户（LLM 无法展示）：必须用 event.send 直发并正常 yield 文本摘要，
+            # 不能用 yield event.make_result()（会让 agent 工具循环短路 DONE，SubAgent 委派时抛
+            # "Agent did not produce a final LLM response"，主 Agent 收 error 后只能自行编造回复）
+            await event.send(MessageChain().file_image(path))
             yield _image_sent_text(f"干员「{name}」{QUERY_TYPE_HINT.get(query_type, '资料')}")
         except Exception as e:
             logger.exception(f"干员查询渲染失败: {e}")
@@ -354,8 +357,8 @@ class ArknightsQuery(star.Star):
             width = int(self.config.get("akq_render_width", 1280))
             timeout = int(self.config.get("akq_render_timeout", 30))
             path = await _render_to_image("material.html", data, width, timeout, f"material_{name}")
-            # 资料图片直接发送给用户（LLM 无法展示图片），同时返回简短摘要供 Agent 收尾
-            yield event.make_result().file_image(path)
+            # 资料图片直发用户（LLM 无法展示），正常 yield 文本摘要（勿用 make_result，见 query_operator）
+            await event.send(MessageChain().file_image(path))
             yield _image_sent_text(f"材料「{name}」")
         except Exception as e:
             logger.exception(f"材料查询渲染失败: {e}")
@@ -390,8 +393,7 @@ class ArknightsQuery(star.Star):
             width = int(self.config.get("akq_render_width", 1280))
             timeout = int(self.config.get("akq_render_timeout", 30))
             path = await _render_to_image("enemy.html", data, width, timeout, f"enemy_{name}")
-            # 资料图片直接发送给用户（LLM 无法展示图片），同时返回简短摘要供 Agent 收尾
-            yield event.make_result().file_image(path)
+            await event.send(MessageChain().file_image(path))
             yield _image_sent_text(f"敌方单位「{name}」")
         except Exception as e:
             logger.exception(f"敌方单位查询渲染失败: {e}")
@@ -423,8 +425,7 @@ class ArknightsQuery(star.Star):
             # 0) 生息演算地图（sxys.json，COS 下载图片）
             sxys_path = await self._query_sxys(stage_name)
             if sxys_path:
-                # 地图图片直接发送给用户（LLM 无法展示图片），同时返回简短摘要供 Agent 收尾
-                yield event.make_result().file_image(sxys_path)
+                await event.send(MessageChain().file_image(sxys_path))
                 yield _image_sent_text(f"生息演算地图「{stage_name}」")
                 return
 
@@ -455,8 +456,7 @@ class ArknightsQuery(star.Star):
                 width = int(self.config.get("akq_render_width", 1280))
                 timeout = int(self.config.get("akq_render_timeout", 30))
                 path = await _render_to_image("stage.html", data, width, timeout, f"stage_{stage_id}")
-                # 关卡资料图片直接发送给用户（LLM 无法展示图片），同时返回简短摘要供 Agent 收尾
-                yield event.make_result().file_image(path)
+                await event.send(MessageChain().file_image(path))
                 yield _image_sent_text(f"关卡「{data['name']}」")
                 return
 
@@ -564,8 +564,8 @@ class ArknightsQuery(star.Star):
                 "operatorRecruit.html", data, width, timeout, f"recruit_{'_'.join(tags)}"
             )
 
-            # 推荐组合图直接发送给用户（LLM 无法展示图片），推荐语返回给 Agent 组织语言
-            yield event.make_result().file_image(path)
+            # 推荐组合图直发用户（LLM 无法展示），推荐语返回给 Agent 组织语言（勿用 make_result，见 query_operator）
+            await event.send(MessageChain().file_image(path))
             yield (
                 f"{akq_recruit.summarize(groups, tags, max_rarity)}\n\n"
                 "以上推荐组合图已直接发送给用户，请基于这份推荐语组织语言向用户呈现推荐结果。"

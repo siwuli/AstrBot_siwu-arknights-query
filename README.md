@@ -92,6 +92,7 @@
 
 | 版本 | 内容 |
 | --- | --- |
+| 1.1.2 | 修复 SubAgent 委派时图片直发导致崩溃的根因：图片直发由 `yield event.make_result().file_image()` 改为 `await event.send(MessageChain().file_image())` + 正常 yield 文本摘要。此前 `make_result` 直发会让 Agent 工具循环短路置 DONE，SubAgent 收不到最终 LLM 回复、抛「Agent did not produce a final LLM response」，主 Agent 只能自行编造（典型表现为主 Agent 长篇转述/罗列图片中的材料清单）。命令回退路径（查干员 等）不走 Agent 循环，保留 `make_result` 直发不受影响 |
 | 1.1.1 | 增强图片直发后的返回提示词：明确告知 Agent「图片已直接发送给用户、用户可直接查看、Agent 无法看到图片内容」，并要求收到图片摘要后仅一句话收尾（如「资料图已发送，请查看上方图片」），严禁转述/编造图片中的数值、属性、材料清单；同步强化系统提示词第 5 条，解决 Agent 在图片直发后仍长篇复述资料内容的问题 |
 | 1.1.0 | 工具输出机制重构（对齐项目通用设计模式）：所有查询工具改为「数据回传 LLM」——文字结果（术语/候选列表/活动列表/未命中引导/错误提示）全部 yield 文本给 Agent 组织语言回复，不再直发；资料图片因 LLM 无法展示仍由工具自动直发，同时返回包含查询对象的简短摘要（替代原固定 TOOL_DONE_PROMPT），Agent 据此自然收尾；删除 TOOL_DONE_PROMPT，重写强制指令中「自动发送/禁止复述」等直发时代的绕弯规则。命令回退（查干员 等）保持直发 |
 | 1.0.16 | 修复公招截图识别**从未生效**的根因：AstrBot 4.27.x 事件对象没有 `.message` 属性（正确 API 为 `event.get_messages()`），此前 1.0.13~1.0.15 截图识别全被异常静默跳过（日志见「'AiocqhttpMessageEvent' object has no attribute 'message'」）。现改用 `get_messages()` 取组件列表，视觉模型识别真正生效；「词条」加入查询意图关键词（如「把所有的词条一起计算」也会强制 Agent 第一步直接调用查询工具，避免先回复承诺再查询导致的重复回复） |
