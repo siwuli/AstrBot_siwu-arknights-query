@@ -159,6 +159,59 @@ def get_operator_skills(operator_name: str):
     skills, skills_id, skills_cost, skills_desc = operator.skills()
     return {"skills": skills, "skills_desc": skills_desc}
 
+def get_operator_modules(operator_name: str):
+    """干员模组数据（operatorModule.html）：解锁条件/任务/属性提升/分支特性与天赋更新/升级材料。
+
+    对照 Amiya-Bot-mcp-server 的 get_operator_modules 补齐：返回 uniequip_table 原始结构
+    （含 missions、detail.phases、itemCost 等字段，模板直接消费），并为每个模组附加
+    _attrs（最后一级的基础属性摘要，供文本汇总使用）。
+    """
+    operator = GameData.operators.get(operator_name)
+    if not operator:
+        return None
+    modules = operator.modules()
+    if not modules:
+        return []
+    for module in modules:
+        attrs = []
+        detail = module.get("detail") or {}
+        phases = detail.get("phases") or []
+        if phases:
+            for attr in phases[-1].get("attributeBlackboard", []):
+                attrs.append(
+                    {
+                        "name": snake_case_to_pascal_case(attr["key"]),
+                        "value": integer(attr["value"]),
+                    }
+                )
+        module["_attrs"] = attrs
+    return modules
+
+
+async def get_operator_skin_card(operator_name: str, skin_index: int = 0):
+    """单个干员皮肤卡片数据（operatorSkin.html）。
+
+    Args:
+        operator_name: 干员规范名称。
+        skin_index: 1 起表示第 N 张皮肤；0（默认）表示最新一张；越界回退最新一张。
+
+    Returns:
+        (card_data, skins, chosen_index)：card_data 为 {name, path, data: {...}} 模板契约；
+        skins 为全部皮肤列表（含皮肤名/系列/画师/获取途径/台词等）；无皮肤时返回 (None, [], 0)。
+    """
+    operator = GameData.operators.get(operator_name)
+    if not operator:
+        return None, [], 0
+    skins = operator.skins()
+    if not skins:
+        return None, [], 0
+    if skin_index < 1 or skin_index > len(skins):
+        skin_index = len(skins)
+    skin = skins[skin_index - 1]
+    path = (await get_skin_file(skin, encode_url=True)) or ""
+    card = {"name": operator.name, "path": path, "data": skin}
+    return card, skins, skin_index
+
 
 # ---------------------------------------------------------------------------
 # 敌方单位

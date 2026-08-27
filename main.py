@@ -66,6 +66,8 @@ QUERY_TYPE_HINT = {
     "cost": "精英化/专精材料",
     "skills": "技能详情",
     "tokens": "召唤物",
+    "module": "模组",
+    "skin": "皮肤",
 }
 
 # 查询意图关键词（Agent 强制工具调用钩子使用）：命中则认为用户在请求明日方舟数据查询。
@@ -82,7 +84,7 @@ QUERY_INTENT_RE = re.compile(
 FORCE_QUERY_TOOL_PROMPT = """\
 [明日方舟查询任务指令]
 用户正在请求查询明日方舟数据。本机器人提供以下查询工具：
-- arknights_query_operator：干员资料（详情/专精材料/技能/召唤物），返回资料图片（直发）与摘要文本
+- arknights_query_operator：干员资料（详情/精英化专精材料/技能/召唤物/模组/皮肤），返回资料图片（直发）与摘要文本；模组用 query_type=module，皮肤用 query_type=skin（可带 skin_index 指定第几张）
 - arknights_query_material：材料资料（合成/掉落/价值），返回资料图片（直发）与摘要文本
 - arknights_query_enemy：敌方单位资料，返回资料图片（直发）与摘要文本
 - arknights_query_stage：关卡资料（地图/敌方单位/掉落/生息演算地图），单关卡返回地图图片（直发）与摘要文本；同名多关卡/活动列表返回文字由你转达
@@ -91,7 +93,8 @@ FORCE_QUERY_TOOL_PROMPT = """\
 
 执行规则（必须严格遵守）：
 1.【第一步必须调用查询工具】把用户消息中出现的名称【原样】作为参数调用对应查询工具
-   （干员→arknights_query_operator，敌方→arknights_query_enemy，材料→arknights_query_material，
+   （干员→arknights_query_operator：默认 info 详情；明确要专精材料/技能/召唤物/模组/皮肤时
+   分别传 query_type=cost/skills/tokens/module/skin；敌方→arknights_query_enemy，材料→arknights_query_material，
    关卡/地图/活动→arknights_query_stage，术语/地形→arknights_query_term，
    公招/招募→arknights_query_recruit，标签文本原样传入）。
    禁止先联网搜索、禁止直接文字回答。
@@ -279,12 +282,13 @@ class ArknightsQuery(star.Star):
                 pass
 
     @llm_tool(name="arknights_query_operator")
-    async def query_operator(self, event: AstrMessageEvent, operator_name: str, query_type: str = "info"):
-        """查询明日方舟干员资料并发送图片。干员资料包括：干员详情（星级/职业/天赋/技能/属性/档案）、精英化与专精材料、技能详情、召唤物信息。请根据用户意图选择合适的 query_type；未明确时用 info。注意：用户明确给出的干员名请【原样】传入本参数，不要自行替换/猜名（若未命中本地数据，本工具会返回引导，请按引导联网确认官方名称后再查询）。仅当用户未给名称时，才可根据上下文推断干员。
+    async def query_operator(self, event: AstrMessageEvent, operator_name: str, query_type: str = "info", skin_index: int = 0):
+        """查询明日方舟干员资料并发送图片。干员资料包括：干员详情（星级/职业/天赋/技能/属性/档案）、精英化与专精材料、技能详情（全部等级与专精数据）、召唤物信息、模组（解锁条件/任务/属性提升/效果/升级材料）、皮肤（立绘/系列/画师/获取途径/台词）。请根据用户意图选择合适的 query_type；未明确时用 info。注意：用户明确给出的干员名请【原样】传入本参数，不要自行替换/猜名（若未命中本地数据，本工具会返回引导，请按引导联网确认官方名称后再查询）。仅当用户未给名称时，才可根据上下文推断干员。
 
         Args:
             operator_name(string): 干员名称，用户明确给出时请原样传入（如用户说"二哥"就传"二哥"）；未给出时可用上下文推断，如 银灰、棘刺、W；支持中文名或英文代号（如 SilverAsh）
-            query_type(string): 查询类型，可选 info(干员详情)/cost(精英化与专精材料)/skills(技能详情)/tokens(召唤物)
+            query_type(string): 查询类型，可选 info(干员详情)/cost(精英化与专精材料)/skills(技能详情)/tokens(召唤物)/module(模组)/skin(皮肤)
+            skin_index(int): 可选，仅 query_type=skin 时生效：1 起表示查看第 N 张皮肤，0（默认）表示最新一张
         """
         if not bool(self.config.get("akq_enabled", True)):
             yield "博士，明日方舟查询功能当前已关闭。"
@@ -301,6 +305,7 @@ class ArknightsQuery(star.Star):
             return
 
         query_type = (query_type or "info").strip().lower()
+        query_type = {"modules": "module", "skins": "skin"}.get(query_type, query_type)
         try:
             if query_type == "cost":
                 data = await akq_query.get_operator_cost(name)
@@ -312,6 +317,13 @@ class ArknightsQuery(star.Star):
                 info, tokens = await akq_query.get_operator_detail(name)
                 data = tokens
                 template = "operatorToken.html"
+            elif query_type == "module":
+                data = akq_query.get_operator_modules(name)
+                template = "operatorModule.html"
+            elif query_type == "skin":
+                card, skins, chosen = await akq_query.get_operator_skin_card(name, int(skin_index or 0))
+                data = card
+                template = "operatorSkin.html"
             else:
                 info, tokens = await akq_query.get_operator_detail(name)
                 data = info
@@ -329,7 +341,25 @@ class ArknightsQuery(star.Star):
             # 不能用 yield event.make_result()（会让 agent 工具循环短路 DONE，SubAgent 委派时抛
             # "Agent did not produce a final LLM response"，主 Agent 收 error 后只能自行编造回复）
             await event.send(MessageChain().file_image(path))
-            yield _image_sent_text(f"干员「{name}」{QUERY_TYPE_HINT.get(query_type, '资料')}")
+            if query_type == "module":
+                module_names = "、".join(
+                    m.get("uniEquipName", "未知模组") for m in data
+                )
+                yield (
+                    f"已向用户直接发送干员「{name}」的模组资料图片（共 {len(data)} 个模组：{module_names}），图片已展示在用户面前。"
+                    "你无法看到图片内容。请自然简短收尾；严禁转述图片中的属性数值、材料清单等内容，不要重复发送图片。"
+                )
+            elif query_type == "skin":
+                skin_list = "、".join(f"{i + 1}.{s['skin_name']}" for i, s in enumerate(skins))
+                yield (
+                    f"已向用户直接发送干员「{name}」第 {chosen}/{len(skins)} 张皮肤「{data['data']['skin_name']}」的立绘图片，"
+                    f"该干员共有 {len(skins)} 张皮肤：{skin_list}。"
+                    "你无法看到图片内容。请自然简短收尾；若用户想查看其他皮肤，可说明还有哪几张，"
+                    "并可在用户要求后用 query_type=skin + skin_index 参数继续查询指定皮肤。"
+                    "严禁转述图片细节或重复发送图片。"
+                )
+            else:
+                yield _image_sent_text(f"干员「{name}」{QUERY_TYPE_HINT.get(query_type, '资料')}")
         except Exception as e:
             logger.exception(f"干员查询渲染失败: {e}")
             yield f"博士，查询干员「{name}」时出错了：{e}"
