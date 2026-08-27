@@ -330,7 +330,12 @@ class ArknightsQuery(star.Star):
                 template = "operatorInfo.html"
 
             if not data:
-                yield f"博士，查询干员「{name}」的资料失败了。"
+                if query_type == "module":
+                    yield f"博士，干员「{name}」目前没有已解锁/可查询的模组。"
+                elif query_type == "skin":
+                    yield f"博士，干员「{name}」目前没有可用皮肤。"
+                else:
+                    yield f"博士，查询干员「{name}」的资料失败了。"
                 return
 
             width = int(self.config.get("akq_render_width", 1280))
