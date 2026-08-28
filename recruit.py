@@ -201,17 +201,3 @@ def summarize(groups: list, tags: list, max_rarity: int) -> str:
         f"博士，【{'、'.join(tags)}】最优组合是【{'、'.join(best['tags'])}】"
         f"，最高可锁 {'★' * best['max_rarity']}：{names}，详细见下图～"
     )
-
-def summarize_detailed(groups: list, tags: list, max_rarity: int) -> str:
-    """生成完整文字推荐（组合图发送失败时的降级方案：逐组列出全部干员）。"""
-    if not groups:
-        return summarize(groups, tags, max_rarity)
-    lines = [f"博士，根据标签【{'、'.join(tags)}】，推荐组合如下："]
-    for i, g in enumerate(groups[:3], 1):
-        ops = "、".join(o["operator_name"] for o in g["operators"])
-        lines.append(
-            f"{i}. 【{'、'.join(g['tags'])}】（最高可锁 {'★' * g['max_rarity']}）：{ops}"
-        )
-    if len(groups) > 3:
-        lines.append(f"…共 {len(groups)} 组组合，以上仅展示前 {3} 组。")
-    return "\n".join(lines)
