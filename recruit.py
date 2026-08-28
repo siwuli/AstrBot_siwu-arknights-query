@@ -26,6 +26,35 @@ SPECIAL_WORDS = ["高级资深干员", "高级资深", "高资", "资深干员",
 # 口语缩写 → 标准标签
 ABBREV_TAGS = {"近战": "近战位", "远程": "远程位"}
 
+# 公招全部可能标签（含特殊标签「新手」）；用于视觉识别幻觉检测
+ALL_TAGS = [
+    "近战位", "远程位", "先锋", "近卫", "重装", "狙击", "医疗", "辅助", "术师", "特种",
+    "资深干员", "高级资深干员", "新手", "控场", "爆发", "支援", "支援机械", "削弱",
+    "快速复活", "位移", "召唤", "生存", "防护", "群攻", "治疗", "输出",
+    "费用回复", "减速", "牵制", "元素",
+]
+
+# 公招截图真实的标签槽位通常不超过 6 个；识别结果超过该数量即判定为幻觉（背模板）
+MAX_VISION_TAGS = 9
+
+
+def suspect_vision_hallucination(caption_text: str) -> bool:
+    """判断公招截图视觉识别结果是否为「模板全集」幻觉输出。
+
+    视觉模型容易把提示词示例里的标签清单原样背出来（十几个甚至二十几个），
+    而截图实际只有几个标签槽位。判定为幻觉时上层应丢弃该结果，
+    避免污染 LLM 转述的真实标签。
+    """
+    if not caption_text:
+        return False
+    for sep in ("、", "，", ",", " ", "／", "/", "；", ";"):
+        if sep in caption_text:
+            parts = [p for p in caption_text.split(sep) if p.strip()]
+            return len(parts) > MAX_VISION_TAGS
+    count = sum(1 for tag in ALL_TAGS if tag in caption_text)
+    return count > MAX_VISION_TAGS
+
+
 _tags_cache = None
 _tags_cache_signature = None
 
