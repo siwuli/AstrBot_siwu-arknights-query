@@ -94,6 +94,7 @@
 
 | 版本 | 内容 |
 | --- | --- |
+| 1.2.1 | 修复立绘查询别名失灵（「芋圆安洁莉娜」案例）：① 代号表补上 芋圆/芋圆安洁莉娜/夏游洁 → 予愿安洁莉娜（玩家谐音称呼）；② 查询意图关键词补上「立绘/皮肤/模组/时装/造型」——此前缺失导致强制指令不触发，主 Agent 把「芋圆安洁莉娜」擅自拆解成「安洁莉娜+芋圆皮肤」查询；③ 强制指令明确「委派子代理时名称也必须原样传参」，禁止改写谐音称呼 |
 | 1.2.0 | 对照 [Amiya-Bot-mcp-server](https://github.com/AmiyaBot/Amiya-Bot-mcp-server) 的 get_operator_modules / get_operator_skins 补齐干员模组与皮肤查询：arknights_query_operator 新增 query_type=module（模组资料卡：解锁条件/任务/属性提升/分支特性与天赋更新/升级材料）与 query_type=skin（皮肤立绘卡：立绘/系列/画师/获取途径/台词，可选 skin_index 指定第 N 张、默认最新一张），复用既有 operatorModule.html / operatorSkin.html 模板与数据层；注入 LLM 的强制指令与工具 docstring 同步更新 |
 | 1.1.3 | 放宽图片直发后的收尾提示词：此前要求「只需一句话告诉用户图片已发送、请查看上方图片」导致 Agent 每次机械复读同一句。现改为自然简短收尾——可结合查询对象与对话上下文自然补一句（如询问用户还想看哪个技能/材料、确认资料是否对得上需求），不再使用固定句式；同时保留核心约束：不得转述/编造图内数值或材料清单、不得重复发图 |
 | 1.1.2 | 修复 SubAgent 委派时图片直发导致崩溃的根因：图片直发由 `yield event.make_result().file_image()` 改为 `await event.send(MessageChain().file_image())` + 正常 yield 文本摘要。此前 `make_result` 直发会让 Agent 工具循环短路置 DONE，SubAgent 收不到最终 LLM 回复、抛「Agent did not produce a final LLM response」，主 Agent 只能自行编造（典型表现为主 Agent 长篇转述/罗列图片中的材料清单）。命令回退路径（查干员 等）不走 Agent 循环，保留 `make_result` 直发不受影响 |
