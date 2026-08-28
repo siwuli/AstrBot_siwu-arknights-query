@@ -46,5 +46,11 @@
     "hint": "用于识别公招截图的视觉模型（如 siliconflow/Qwen/Qwen3-VL-32B-Instruct）。留空则自动使用全局配置的图片描述 Provider（provider_ltm_settings.image_caption_provider_id），再留空则用当前默认 Provider",
     "type": "string",
     "default": ""
+  },
+  "akq_send_retry": {
+    "description": "图片发送失败重试次数",
+    "hint": "公招组合图等直发图片失败（OneBot Highway 上传偶发 323）时自动重试；重试完仍失败则降级为纯文字推荐，不会报错",
+    "type": "int",
+    "default": 3
   }
 }

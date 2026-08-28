@@ -557,6 +557,24 @@ class ArknightsQuery(star.Star):
             text += f"\n（共找到 {len(results)} 条，仅显示前 12 条，可换更精确的名称查询）"
         yield text
 
+async def _send_image_with_retry(event, path: str, attempts: int = 3, base_delay: float = 2.0):
+    """直发本地图片，失败自动重试（OneBot Highway 上传偶发失败，如 code 323）。
+
+    返回 (是否成功, 最后一次错误信息或 None)。
+    """
+    last_err = None
+    for i in range(max(1, int(attempts))):
+        try:
+            await event.send(MessageChain().file_image(path))
+            return True, None
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            logger.warning("图片发送失败（第 %d/%d 次）: %s", i + 1, attempts, e)
+            if i < attempts - 1:
+                await asyncio.sleep(base_delay * (i + 1))
+    return False, (str(last_err) if last_err else "未知错误")
+
+
     @llm_tool(name="arknights_query_recruit")
     async def query_recruit(self, event: AstrMessageEvent, tags_text: str = ""):
         """查询明日方舟公开招募（公招）标签组合推荐并发送「推荐语+组合图」。用于回答「公招」「帮我看看这几个标签」「生存防护怎么选」「高资 公招」「近战 生存 快速复活」等公招相关请求。用户发来公招界面截图时（即使不带标签文字），也必须调用本工具，工具会自动识别截图中的标签。注意：标签文本请【原样】传入，不要自行增删改；工具会自己判断标签有效性并给出推荐组合，若识别出多个标签会推荐最优组合（最高稀有度）。
@@ -606,12 +624,23 @@ class ArknightsQuery(star.Star):
                 "operatorRecruit.html", data, width, timeout, f"recruit_{'_'.join(tags)}"
             )
 
-            # 推荐组合图直发用户（LLM 无法展示），推荐语返回给 Agent 组织语言（勿用 make_result，见 query_operator）
-            await event.send(MessageChain().file_image(path))
-            yield (
-                f"{akq_recruit.summarize(groups, tags, max_rarity)}\n\n"
-                "以上推荐组合图已直接发送给用户，请基于这份推荐语组织语言向用户呈现推荐结果。"
-            )
+            # 推荐组合图直发用户（LLM 无法展示），推荐语返回给 Agent 组织语言。
+            # OneBot 图床/Highway 上传偶发失败（如 code 323）：自动重试，仍失败降级为完整文字推荐。
+            tries = max(1, int(self.config.get("akq_send_retry", 3) or 3))
+            ok, err = await _send_image_with_retry(event, path, tries)
+            summary = akq_recruit.summarize(groups, tags, max_rarity)
+            if ok:
+                yield (
+                    f"{summary}\n\n"
+                    "以上推荐组合图已直接发送给用户，请基于这份推荐语组织语言向用户呈现推荐结果。"
+                )
+            else:
+                detailed = akq_recruit.summarize_detailed(groups, tags, max_rarity)
+                yield (
+                    f"{detailed}\n\n"
+                    f"【提示】推荐组合图发送失败（{err}），图片未能直发用户；"
+                    "请基于上面这份完整文字推荐向用户呈现结果，不要提及技术细节。"
+                )
         except Exception as e:
             logger.exception(f"公招查询渲染失败: {e}")
             yield f"博士，查询公招组合时出错了：{e}"
@@ -698,388 +727,3 @@ class ArknightsQuery(star.Star):
 
     # ------------------------------------------------------------------
     # 关卡辅助
-    # ------------------------------------------------------------------
-    async def _query_sxys(self, text: str):
-        """生息演算地图：匹配 sxys.json 中的名称并下载 COS 图片，返回本地路径；未命中返回 None。"""
-        sxys_path = os.path.join(PLUGIN_DIR, "sxys.json")
-        if not os.path.exists(sxys_path):
-            return None
-        if self._sxys_maps is None:
-            with open(sxys_path, encoding="utf-8") as f:
-                self._sxys_maps = json.load(f) or {}
-        titles = {}
-        for item, key in self._sxys_maps.items():
-            titles[item] = key
-            titles[remove_punctuation(item, ["-"])] = key
-        best, best_key = "", None
-        for title, key in titles.items():
-            if title and title in text and len(title) > len(best):
-                best, best_key = title, key
-        if not best_key:
-            return None
-        cache_dir = os.path.join(TMP_DIR, "sxys")
-        os.makedirs(cache_dir, exist_ok=True)
-        target = os.path.join(cache_dir, f"{best_key}.jpg")
-        if not os.path.exists(target):
-            try:
-                content = await gamedata._download_url(SXYS_MAP_URL.format(key=best_key))
-                if content:
-                    with open(target, "wb") as f:
-                        f.write(content)
-                else:
-                    return None
-            except Exception as e:
-                logger.warning(f"生息演算地图下载失败 {best_key}: {e}")
-                return None
-        return target
-
-    def _build_stage_data(self, stage_id: str, level: str, level_str: str):
-        """构建 stage.html 渲染数据（对应 Amiya-Bot stages 插件的组装逻辑）。"""
-        stage = GameData.stages.get(stage_id)
-        if not stage:
-            return None
-        res = {
-            **stage,
-            "name": stage["name"] + level_str,
-            "zones": MULTIPLE_ZONE_STAGE.get(stage["code"], 0),
-        }
-        if level == "_easy":
-            main_level = GameData.stages.get(stage_id.replace("easy", "main"))
-            if main_level:
-                res["levelData"] = main_level["levelData"]
-        # 地图缺失时降级到 main 关卡地图（与 Amiya-Bot 一致）
-        if not os.path.exists(os.path.join(GAMEDATA_DIR, "map", f"{res['stageId'].replace('#f#', '')}.png")):
-            res["stageId"] = res["stageId"].replace("tough", "main").replace("easy", "main")
-        # 兜底：缺关卡数据/掉落数据时保证模板不报错
-        ld = res.get("levelData") or {}
-        res["levelData"] = {
-            "options": ld.get("options") or {},
-            "enemyDbRefs": ld.get("enemyDbRefs") or [],
-            "enemiesCount": ld.get("enemiesCount") or {},
-        }
-        res.setdefault("stageDropInfo", {"displayDetailRewards": []})
-        return res
-
-    def _stage_candidates_text(self, stage_ids: list, level_str: str) -> str:
-        lines = ["博士，找到以下同名/同代号关卡，请回复序号查询对应的关卡：\n"]
-        for index, sid in enumerate(stage_ids):
-            stage = GameData.stages.get(sid)
-            if not stage:
-                continue
-            lines.append(f"[{index + 1}] {stage['code']} {stage['name']}{level_str}")
-        return "\n".join(lines)
-
-    def _side_story_list_text(self, story_name: str, stage_ids: list) -> str:
-        lines = [f"博士，以下是活动【{story_name}】的关卡列表：\n|关卡代号|关卡名|关卡代号|关卡名|", "|---|---|---|---|"]
-        for index, sid in enumerate(stage_ids):
-            stage = GameData.stages.get(sid)
-            if not stage:
-                continue
-            code = stage["code"] + ("**突袭**" if stage.get("difficulty") == "FOUR_STAR" else "")
-            name = stage["name"] + ("**（突袭）**" if stage.get("difficulty") == "FOUR_STAR" else "")
-            line = f"|{code}|{name}"
-            if (index + 1) % 2 == 0:
-                line += "|"
-            lines.append(line)
-        return "\n".join(lines)
-
-    def _activity_list_text(self) -> str:
-        lines = ["博士，以下是活动列表：\n|活动名|活动名|活动名|活动名|", "|---|---|---|---|"]
-        for index, name in enumerate(reversed(list(GameData.side_story_map.keys()))):
-            lines.append(f"|{name}{'|' if (index + 1) % 4 == 0 else ''}")
-        return "\n".join(lines)
-
-    @llm_tool(name="arknights_query_alias")
-    async def manage_alias(self, event: AstrMessageEvent, action: str, kind: str, alias: str, name: str = ""):
-        """管理干员/敌方单位的代号（别名）记录。用户查询时经常使用社区外号/谐音（如 夏游洁 指 予愿安洁莉），查询工具会自动先用别名记录解析输入。当查询工具返回「未找到」、而你能通过联网搜索或对话上下文确认用户指的是哪个干员/敌人时，用本工具登记代号，登记后后续查询可直接命中；也可查询已登记的别名或删除错误记录。
-
-        Args:
-            action(string): 操作类型，可选 query(查询已登记的别名)/register(登记别名)/remove(删除别名)
-            kind(string): 类别，可选 operator(干员)/enemy(敌方单位)
-            alias(string): 用户使用的代号，如 夏游洁
-            name(string): 对应的规范名称，仅 register 时必填，如 予愿安洁莉娜
-        """
-        action = (action or "").strip().lower()
-        kind = (kind or "").strip().lower()
-        alias = (alias or "").strip()
-
-        if not bool(self.config.get("akq_enabled", True)):
-            # 工具返回值（yield 字符串）给 Agent，由 Agent 转达用户
-            yield "博士，明日方舟查询功能当前已关闭。"
-            return
-
-        if action == "register":
-            if not name:
-                yield "登记代号需要提供规范名称（name），如：夏游洁 → 予愿安洁莉娜。"
-                return
-            # 校验并规范化为搜索命中的规范名，避免登记非规范名
-            canonical = None
-            if kind == "operator":
-                canonical = akq_query.search_operator(name)
-            elif kind == "enemy":
-                canonical = akq_query.search_enemy(name)
-            if not canonical:
-                yield (
-                    f"登记失败：{kind} 类中找不到与「{name}」对应的干员/敌人，"
-                    "请确认名称正确（可用联网搜索确认官方名称后再登记）。"
-                )
-                return
-            if akq_aliases.register(kind, alias, canonical):
-                yield f"已登记代号：{kind}「{alias}」→「{canonical}」。以后直接查询「{alias}」即可命中。"
-            else:
-                yield "登记失败：kind 需为 operator 或 enemy。"
-        elif action == "remove":
-            if akq_aliases.remove(kind, alias):
-                yield f"已删除代号「{alias}」。"
-            else:
-                yield f"代号「{alias}」不存在，无需删除。"
-        elif action == "query":
-            table = akq_aliases.all_aliases(kind if kind in ("operator", "enemy") else None)
-            if not any(table.values()):
-                yield "暂无已登记的代号记录。"
-                return
-            lines = []
-            for k in ("operator", "enemy"):
-                if table.get(k):
-                    lines.append(f"{k}：")
-                    for a, n in table[k].items():
-                        lines.append(f"  {a} → {n}")
-            yield "\n".join(lines)
-        else:
-            yield "未知操作，action 可选 query / register / remove。"
-
-    # ------------------------------------------------------------------
-    # 命令回退（需 @ 或唤醒词）
-    # ------------------------------------------------------------------
-    async def _command_query(self, event: AstrMessageEvent, keyword: str, kind: str):
-        if not bool(self.config.get("akq_enabled", True)):
-            event.stop_event()
-            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
-            return
-        if not await self._wait_ready():
-            event.stop_event()
-            yield event.make_result().message(self._not_ready_message())
-            return
-
-        text = event.get_message_str() or ""
-        name_part = text.replace(keyword, "", 1).strip()
-        if not name_part:
-            event.stop_event()
-            yield event.make_result().message(
-                f"博士，请在「{keyword}」后面输入要查询的名称，例如：\n{keyword} 银灰"
-            )
-            return
-
-        if kind == "operator":
-            result = event.make_result()
-            name = akq_query.search_operator(name_part)
-            if not name:
-                yield result.message(f"博士，没有找到干员「{name_part}」的资料～")
-                event.stop_event()
-                return
-            data = (await akq_query.get_operator_detail(name))[0]
-            template, tag = "operatorInfo.html", f"operator_cmd_{name}"
-            type_hint = "干员详情"
-        elif kind == "material":
-            result = event.make_result()
-            name = akq_query.search_material(name_part)
-            if not name:
-                yield result.message(f"博士，没有找到材料「{name_part}」的资料～")
-                event.stop_event()
-                return
-            data = akq_query.check_material(name)
-            template, tag = "material.html", f"material_cmd_{name}"
-            type_hint = "材料"
-        else:
-            result = event.make_result()
-            name = akq_query.search_enemy(name_part)
-            if not name:
-                yield result.message(f"博士，没有找到敌方单位「{name_part}」的资料～")
-                event.stop_event()
-                return
-            data = akq_query.get_enemy(name)
-            template, tag = "enemy.html", f"enemy_cmd_{name}"
-            type_hint = "敌方单位"
-
-        if not data:
-            event.stop_event()
-            yield event.make_result().message(f"博士，查询{type_hint}「{name}」的资料失败了。")
-            return
-
-        try:
-            width = int(self.config.get("akq_render_width", 1280))
-            timeout = int(self.config.get("akq_render_timeout", 30))
-            path = await _render_to_image(template, data, width, timeout, tag)
-            yield event.make_result().file_image(path)
-        except Exception as e:
-            logger.exception(f"命令查询渲染失败: {e}")
-            yield event.make_result().message(f"博士，查询「{name}」时出错了：{e}")
-        event.stop_event()
-
-    @filter.command("查干员")
-    async def cmd_operator(self, event: AstrMessageEvent):
-        """查干员 xxx（需 @ 或唤醒词）"""
-        async for r in self._command_query(event, "查干员", "operator"):
-            yield r
-
-    @filter.command("查材料")
-    async def cmd_material(self, event: AstrMessageEvent):
-        """查材料 xxx（需 @ 或唤醒词）"""
-        async for r in self._command_query(event, "查材料", "material"):
-            yield r
-
-    @filter.command("查敌人")
-    async def cmd_enemy(self, event: AstrMessageEvent):
-        """查敌人 xxx（需 @ 或唤醒词）"""
-        async for r in self._command_query(event, "查敌人", "enemy"):
-            yield r
-
-    @filter.command("查关卡")
-    async def cmd_stage(self, event: AstrMessageEvent):
-        """查关卡 xxx（需 @ 或唤醒词）：关卡代号/名称/活动/生息演算地图"""
-        if not bool(self.config.get("akq_enabled", True)):
-            event.stop_event()
-            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
-            return
-        if not await self._wait_ready():
-            event.stop_event()
-            yield event.make_result().message(self._not_ready_message())
-            return
-
-        text = (event.get_message_str() or "").replace("查关卡", "", 1).strip()
-        if not text:
-            event.stop_event()
-            yield event.make_result().message(
-                "博士，请在「查关卡」后面输入要查询的关卡，例如：\n查关卡 1-7\n查关卡 CE-6 突袭\n查关卡 骑兵与猎人"
-            )
-            return
-
-        try:
-            sxys_path = await self._query_sxys(text)
-            if sxys_path:
-                event.stop_event()
-                yield event.make_result().file_image(sxys_path)
-                return
-
-            stage_ids, level, level_str = akq_query.search_stage(text)
-            if stage_ids:
-                stage_id = stage_ids[0] if len(stage_ids) == 1 else None
-                if not stage_id:
-                    event.stop_event()
-                    yield event.make_result().message(self._stage_candidates_text(stage_ids, level_str))
-                    return
-                data = self._build_stage_data(stage_id, level, level_str)
-                if data:
-                    width = int(self.config.get("akq_render_width", 1280))
-                    timeout = int(self.config.get("akq_render_timeout", 30))
-                    path = await _render_to_image("stage.html", data, width, timeout, f"stage_cmd_{stage_id}")
-                    event.stop_event()
-                    yield event.make_result().file_image(path)
-                    return
-
-            story_name, ss_ids = akq_query.search_side_story(text)
-            if story_name:
-                event.stop_event()
-                yield event.make_result().message(self._side_story_list_text(story_name, ss_ids))
-                return
-
-            if "活动" in text:
-                event.stop_event()
-                yield event.make_result().message(self._activity_list_text())
-                return
-
-            event.stop_event()
-            yield event.make_result().message(
-                f"博士，没有找到关卡「{text}」的资料，请确认关卡代号或名称是否正确，可尝试带上活动名（如「别传 SV-3」）。"
-            )
-        except Exception as e:
-            logger.exception(f"命令关卡查询失败: {e}")
-            event.stop_event()
-            yield event.make_result().message(f"博士，查询关卡「{text}」时出错了：{e}")
-
-    @filter.command("查术语")
-    async def cmd_term(self, event: AstrMessageEvent):
-        """查术语 xxx（需 @ 或唤醒词）"""
-        if not bool(self.config.get("akq_enabled", True)):
-            event.stop_event()
-            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
-            return
-        if not await self._wait_ready():
-            event.stop_event()
-            yield event.make_result().message(self._not_ready_message())
-            return
-
-        text = (event.get_message_str() or "").replace("查术语", "", 1).strip()
-        if not text:
-            event.stop_event()
-            yield event.make_result().message("博士，请在「查术语」后面输入术语名称，例如：\n查术语 眩晕")
-            return
-
-        results = akq_query.search_term(text)
-        if not results:
-            event.stop_event()
-            yield event.make_result().message(f"博士，没有找到术语「{text}」的资料，请换一个说法试试～")
-            return
-        msg = f"博士，通过【{text}】查找到以下术语：\n"
-        for item in results[:12]:
-            msg += f"【{item['name']}】\n{item['description']}\n"
-        if len(results) > 12:
-            msg += f"\n（共找到 {len(results)} 条，仅显示前 12 条，可换更精确的名称查询）"
-        event.stop_event()
-        yield event.make_result().message(msg)
-
-    @filter.command("查公招")
-    async def cmd_recruit(self, event: AstrMessageEvent):
-        """查公招 标签组合（需 @ 或唤醒词）：支持文字标签与公招截图识别"""
-        if not bool(self.config.get("akq_enabled", True)):
-            event.stop_event()
-            yield event.make_result().message("博士，明日方舟查询功能当前已关闭。")
-            return
-        if not await self._wait_ready():
-            event.stop_event()
-            yield event.make_result().message(self._not_ready_message())
-            return
-
-        text = (event.get_message_str() or "").replace("查公招", "", 1).strip()
-        if not text:
-            caption_text = await self._caption_event_image(event)
-            if not caption_text:
-                event.stop_event()
-                yield event.make_result().message(
-                    "博士，请在「查公招」后输入公招标签（例如：查公招 生存防护），或发送公招界面截图。"
-                )
-                return
-            text = caption_text
-
-        tags, max_rarity = akq_recruit.parse_tags(text)
-        if not tags:
-            event.stop_event()
-            yield event.make_result().message(
-                f"博士，没有从「{text}」中识别出有效的公招标签，请提供如 生存、防护、近战位、高资 等标签～"
-            )
-            return
-
-        try:
-            groups = akq_recruit.build_groups(tags, max_rarity)
-            if not groups:
-                event.stop_event()
-                yield event.make_result().message(
-                    f"博士，根据标签【{'、'.join(tags)}】没有找到可以锁定稀有干员的组合，建议提供更多标签再试试～"
-                )
-                return
-
-            data = {"groups": groups, "tags": tags}
-            width = int(self.config.get("akq_render_width", 1280))
-            timeout = int(self.config.get("akq_render_timeout", 30))
-            path = await _render_to_image(
-                "operatorRecruit.html", data, width, timeout, f"recruit_cmd_{'_'.join(tags)}"
-            )
-            result = event.make_result()
-            result.message(akq_recruit.summarize(groups, tags, max_rarity))
-            result.file_image(path)
-            event.stop_event()
-            yield result
-        except Exception as e:
-            logger.exception(f"命令公招查询失败: {e}")
-            event.stop_event()
-            yield event.make_result().message(f"博士，查询公招组合时出错了：{e}")
