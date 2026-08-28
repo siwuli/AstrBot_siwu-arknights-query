@@ -34,25 +34,26 @@ ALL_TAGS = [
     "费用回复", "减速", "牵制", "元素",
 ]
 
-# 公招截图真实的标签槽位通常不超过 6 个；识别结果超过该数量即判定为幻觉（背模板）
-MAX_VISION_TAGS = 9
+# 公招界面固定 5 个标签槽位：不多不少
+EXPECTED_VISION_TAGS = 5
 
 
-def suspect_vision_hallucination(caption_text: str) -> bool:
-    """判断公招截图视觉识别结果是否为「模板全集」幻觉输出。
+def invalid_vision_output(caption_text: str) -> bool:
+    """判断公招截图视觉识别结果是否无效（识别不正确）。
 
-    视觉模型容易把提示词示例里的标签清单原样背出来（十几个甚至二十几个），
-    而截图实际只有几个标签槽位。判定为幻觉时上层应丢弃该结果，
-    避免污染 LLM 转述的真实标签。
+    公招界面永远只有 5 个标签槽位，因此视觉模型输出必须恰好是 5 个标签：
+    - 背出提示词示例模板（十几个、二十几个）→ 无效；
+    - 漏识别（4 个及以下）或多识别（6 个及以上）→ 无效；
+    - 无分隔符的整句文本 → 无效。
+    判定无效时上层应丢弃该结果，避免污染 LLM 转述的真实标签。
     """
     if not caption_text:
-        return False
+        return True
     for sep in ("、", "，", ",", " ", "／", "/", "；", ";"):
         if sep in caption_text:
             parts = [p for p in caption_text.split(sep) if p.strip()]
-            return len(parts) > MAX_VISION_TAGS
-    count = sum(1 for tag in ALL_TAGS if tag in caption_text)
-    return count > MAX_VISION_TAGS
+            return len(parts) != EXPECTED_VISION_TAGS
+    return True
 
 
 _tags_cache = None

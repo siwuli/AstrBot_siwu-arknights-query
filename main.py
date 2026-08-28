@@ -578,11 +578,11 @@ class ArknightsQuery(star.Star):
         if bool(self.config.get("akq_vision_enabled", True)):
             caption_text = await self._caption_event_image(event)
             if caption_text:
-                if akq_recruit.suspect_vision_hallucination(caption_text):
-                    # 视觉模型把提示词示例全背出来（模板全集幻觉）时丢弃，
-                    # 避免污染 LLM 转述的真实标签
+                if akq_recruit.invalid_vision_output(caption_text):
+                    # 公招界面固定 5 个标签：背模板/漏识别/多识别都视为无效，
+                    # 丢弃该类结果，避免污染 LLM 转述的真实标签
                     logger.warning(
-                        "公招截图视觉识别疑似模板全集幻觉，已丢弃: %s",
+                        "公招截图视觉识别结果无效（应恰好 5 个标签），已丢弃: %s",
                         caption_text[:150],
                     )
                     caption_text = ""
