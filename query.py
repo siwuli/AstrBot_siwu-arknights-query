@@ -481,13 +481,19 @@ def search_side_story(text: str):
 
 
 def search_term(text: str):
-    """术语名匹配（名称包含）。返回术语列表（{'name','description'}）。"""
+    """术语名匹配（名称包含 + 常见口语互换）。返回术语列表（{'name','description'}）。"""
     text = (text or "").strip().lower()
     if not text:
         return []
+    # 常见口语互换：游戏内术语为「晕眩」，玩家常说「眩晕」（双向兼容）
+    queries = {text}
+    if "眩晕" in text:
+        queries.add(text.replace("眩晕", "晕眩"))
+    if "晕眩" in text:
+        queries.add(text.replace("晕眩", "眩晕"))
     result = []
     for item in GameData.term_descriptions.values():
         name = item["name"].lower()
-        if text == name or text in name:
+        if any(q == name or q in name for q in queries):
             result.append(item)
     return result
