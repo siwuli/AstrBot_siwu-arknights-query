@@ -284,17 +284,6 @@ class ArknightsQuery(star.Star):
             except Exception:
                 pass
 
-        # 4) 查询场景移除方舟子代理转交工具：避免主 Agent 把用户原话转交给子代理后，
-        #    子代理自行改写谐音/社区称呼（如「芋圆安洁莉娜」→「安洁莉娜」）导致查询错对象。
-        #    主 Agent 必须直接用查询工具（内置代号表会解析 芋圆→予愿安洁莉娜 等）。
-        if req.func_tool is not None:
-            try:
-                for name in list(req.func_tool.names()):
-                    if name.startswith("transfer_to_subagent_") and "arknights" in name:
-                        req.func_tool.remove_tool(name)
-            except Exception:
-                pass
-
     @llm_tool(name="arknights_query_operator")
     async def query_operator(self, event: AstrMessageEvent, operator_name: str, query_type: str = "info", skin_index: int = 0):
         """查询明日方舟干员资料并发送图片。干员资料包括：干员详情（星级/职业/天赋/技能/属性/档案）、精英化与专精材料、技能详情（全部等级与专精数据）、召唤物信息、模组（解锁条件/任务/属性提升/效果/升级材料）、皮肤（立绘/系列/画师/获取途径/台词）。请根据用户意图选择合适的 query_type；未明确时用 info。注意：用户明确给出的干员名请【原样】传入本参数，不要自行替换/猜名（若未命中本地数据，本工具会返回引导，请按引导联网确认官方名称后再查询）。仅当用户未给名称时，才可根据上下文推断干员。
