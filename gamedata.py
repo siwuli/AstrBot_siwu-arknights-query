@@ -55,6 +55,35 @@ config = {
 
 html_symbol = {"<替身>": "&lt;替身&gt;", "<支援装置>": "&lt;支援装置&gt;"}
 
+# ---------------------------------------------------------------------------
+# 驻留字段白名单：原始 JSON（levels 503MB + excel 143MB）整表 json.load 成 Python
+# 对象后内存膨胀 3~4 倍（实测 RSS ~3.8GB）。这里只保留构建与查询实际消费的字段，
+# 其余字段在构建完成后立即释放，可把常驻内存压回 ~1GB 量级。
+# ---------------------------------------------------------------------------
+CHAR_ROW_KEEP = (
+    "name", "appellation", "displayNumber", "position", "tagList",
+    "itemUsage", "itemDesc", "potentialItemId", "classicPotentialItemId",
+    "isSpChar", "rarity", "profession", "subProfessionId", "teamId",
+    "groupId", "nationId", "trait", "phases", "skills", "displayTokenDict",
+    "talents", "potentialRanks", "favorKeyFrames", "allSkillLvlup", "description",
+)
+TOKEN_ROW_KEEP = ("name", "appellation", "description", "profession", "position", "phases")
+VOICE_ROW_KEEP = ("voiceTitle", "voiceText", "voiceAsset")
+SKIN_ROW_KEEP = ("skinId", "voiceId", "voiceType")
+DISPLAY_SKIN_KEEP = (
+    "skinName", "drawerList", "skinGroupName", "dialog", "usage",
+    "description", "obtainApproach", "getTime",
+)
+STAGE_ROW_KEEP = (
+    "stageType", "difficulty", "stageId", "code", "name", "description",
+    "dangerLevel", "apCost",
+)
+
+
+def prune_row(row: dict, keep):
+    """只保留 keep 中声明的字段（缺失补 None，与后续 .get/下标访问语义一致）。"""
+    return {k: row.get(k) for k in keep}
+
 
 class JsonData:
     """读取 {JSON_DIR}/{folder}/{name}.json 并缓存。"""
@@ -179,7 +208,7 @@ def init_operators():
         char_id = item["wordKey"]
         if char_id not in Collection.voice_map:
             Collection.voice_map[char_id] = []
-        Collection.voice_map[char_id].append(item)
+        Collection.voice_map[char_id].append(prune_row(item, VOICE_ROW_KEEP))
 
     for n, item in skins_data.items():
         char_id = item["charId"]
@@ -190,18 +219,25 @@ def init_operators():
             char_id = "char_1037_amiya3"
         if char_id not in Collection.skins_map:
             Collection.skins_map[char_id] = []
-        Collection.skins_map[char_id].append(item)
+        Collection.skins_map[char_id].append(
+            {
+                **prune_row(item, SKIN_ROW_KEEP),
+                "displaySkin": prune_row(item.get("displaySkin") or {}, DISPLAY_SKIN_KEEP),
+            }
+        )
 
     operators = []
     birth = {}
     for code, item in operators_list.items():
         if item["profession"] not in config["classes"]:
-            token = TokenImpl(code, item)
+            token = TokenImpl(code, prune_row(item, TOKEN_ROW_KEEP))
             Collection.tokens_map[code] = token
             Collection.tokens_map[token.name] = token
             Collection.tokens_map[token.en_name] = token
             continue
-        operator = OperatorImpl(code=code, data=item, is_recruit=item["name"] in recruit_operators)
+        operator = OperatorImpl(
+            code=code, data=prune_row(item, CHAR_ROW_KEEP), is_recruit=item["name"] in recruit_operators
+        )
         operators.append(operator)
 
     for item in operators:
@@ -248,7 +284,6 @@ def init_materials():
             "material_name": material_name,
             "material_icon": item["iconId"],
             "material_desc": item["usage"],
-            "meta_data": item,
         }
         materials_map[material_name] = item_id
 
@@ -330,8 +365,9 @@ def init_stages():
     for stage_id, item in stage_data.items():
         if not item["name"]:
             continue
+        level_name = (item["levelId"] or "no_level").lower()
         try:
-            level_data = JsonData.get_json_data((item["levelId"] or "no_level").lower(), folder="levels")
+            level_data = JsonData.get_json_data(level_name, folder="levels")
         except Exception:
             continue
 
@@ -348,8 +384,8 @@ def init_stages():
         stage_key = item["code"] + level
         stage_key_name = remove_punctuation(item["name"].strip()) + level
 
+        enemies = {}
         if level_data:
-            enemies = {}
             for wave in level_data["waves"]:
                 for fragment in wave["fragments"]:
                     for action in fragment["actions"]:
@@ -363,18 +399,44 @@ def init_stages():
                             else:
                                 continue
                         enemies[action["key"]]["count"] += action["count"]
-            level_data["enemiesCount"] = enemies
 
-        if item["stageDropInfo"] and item["stageDropInfo"]["displayDetailRewards"]:
-            for info in item["stageDropInfo"]["displayDetailRewards"]:
-                if info["type"] == "CHAR":
+        # 只保留模板消费的 3 个字段，waves/routes/mapData 等大字段即刻释放并清缓存
+        level_data = {
+            "options": level_data.get("options") or {},
+            "enemyDbRefs": level_data.get("enemyDbRefs") or [],
+            "enemiesCount": enemies,
+        } if level_data else {}
+        JsonData.clear_cache(level_name)
+
+        drop_rewards = []
+        stage_drop_info = item.get("stageDropInfo") or {}
+        if stage_drop_info.get("displayDetailRewards"):
+            for info in stage_drop_info["displayDetailRewards"]:
+                detail = None
+                if info.get("type") == "CHAR":
                     if info["id"] in operators_list:
-                        info["detail"] = operators_list[info["id"]]
-                else:
-                    if info["id"] in item_data:
-                        info["detail"] = item_data[info["id"]]
+                        detail = {"name": operators_list[info["id"]].get("name")}
+                elif info["id"] in item_data:
+                    detail = {
+                        "name": item_data[info["id"]].get("name"),
+                        "iconId": item_data[info["id"]].get("iconId"),
+                    }
+                drop_rewards.append(
+                    {
+                        "occPercent": info.get("occPercent"),
+                        "type": info.get("type"),
+                        "id": info.get("id"),
+                        "dropType": info.get("dropType"),
+                        "detail": detail,
+                    }
+                )
 
-        stage_list[stage_id] = {**item, "levelData": level_data, "activity": ""}
+        stage_list[stage_id] = {
+            **prune_row(item, STAGE_ROW_KEEP),
+            "stageDropInfo": {"displayDetailRewards": drop_rewards},
+            "levelData": level_data,
+            "activity": "",
+        }
 
         if item["code"].startswith("GT"):
             side_story_map["骑兵与猎人"][stage_id] = stage_list[stage_id]
