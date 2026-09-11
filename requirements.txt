@@ -1,4 +1,5 @@
 # HTML 模板截图出图（复用 Amiya-Bot 模板，Playwright + Chromium）
-# 版本须与本机 ms-playwright 浏览器内核匹配（chromium-1179）
-playwright==1.53.0
-# 安装 Chromium：python -m playwright install chromium
+# 版本须与镜像内预装的浏览器内核一致：playwright 1.62.0 -> chromium-1234
+# 镜像已预装（见 astrbot.Dockerfile），此处仅作声明与兜底
+playwright==1.62.0
+# 安装 Chromium：PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright python -m playwright install --with-deps chromium
