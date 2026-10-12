@@ -14,8 +14,28 @@ from .utils import find_most_similar, integer, remove_punctuation, snake_case_to
 # ---------------------------------------------------------------------------
 # 干员
 # ---------------------------------------------------------------------------
+def resolve_exact(kind: str, text: str):
+    """按规范名/英文名精确匹配，返回规范名或 None。
+
+    不含代号表（别名）、不含模糊匹配、不含敌方索引号——专供代号登记做目标校验。
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    if kind == "operator":
+        if text in GameData.operators:
+            return text
+        for op in GameData.operators.values():
+            if op.en_name == text:
+                return op.name
+    elif kind == "enemy":
+        if text in GameData.enemies:
+            return text
+    return None
+
+
 def search_operator(text: str, use_similar: bool = True):
-    """干员名匹配：代号记录 → 精确 → 英文名 →（use_similar）包含 → 相似。返回规范名称或 None。
+    """干员名匹配：精确 → 英文名 → 代号记录 →（use_similar）包含 → 相似。返回规范名称或 None。
 
     use_similar=False 时跳过全部模糊匹配（包含匹配与相似度匹配）。
     模糊匹配对社区外号/简称易误匹配：如「圣初雪」会被包含匹配误配到「初雪」，
@@ -26,18 +46,16 @@ def search_operator(text: str, use_similar: bool = True):
     if not text:
         return None
 
-    # 先查历史代号记录（如 夏游洁 -> 予愿安洁莉）
+    # 真名优先于代号记录：代号表里若存在与真名同名的错记录（旧版登记时把查不到的
+    # 名字模糊匹配成了别的干员，如「克莱门莎 → 莎草」），会永久遮蔽该干员。
+    exact = resolve_exact("operator", text)
+    if exact:
+        return exact
+
+    # 再查历史代号记录（如 夏游洁 -> 予愿安洁莉）
     resolved = akq_aliases.resolve("operator", text)
     if resolved:
         return resolved
-
-    if text in GameData.operators:
-        return text
-
-    # 英文名映射
-    for op in GameData.operators.values():
-        if op.en_name == text:
-            return op.name
 
     if use_similar:
         # 包含匹配（干员名出现在输入中）
@@ -307,7 +325,7 @@ def get_enemy(name: str, get_links: bool = True):
 
 
 def search_enemy(text: str, use_similar: bool = True):
-    """敌方名匹配：代号记录 → 精确 → 索引号 →（use_similar）包含/相似。返回规范名称或 None。
+    """敌方名匹配：精确 → 代号记录 → 索引号 →（use_similar）包含/相似。返回规范名称或 None。
 
     use_similar=False 时跳过全部模糊匹配（包含匹配与相似度匹配），
     Agent 路径不信任模糊匹配，未命中时交给调用方（Agent）联网确认并登记代号。
@@ -316,13 +334,15 @@ def search_enemy(text: str, use_similar: bool = True):
     if not text:
         return None
 
-    # 先查历史代号记录
+    # 真名优先于代号记录，理由同 search_operator
+    exact = resolve_exact("enemy", text)
+    if exact:
+        return exact
+
+    # 再查历史代号记录
     resolved = akq_aliases.resolve("enemy", text)
     if resolved:
         return resolved
-
-    if text in GameData.enemies:
-        return text
 
     # 敌方单位索引号匹配
     for item in GameData.enemies.values():

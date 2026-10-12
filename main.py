@@ -800,13 +800,13 @@ class ArknightsQuery(star.Star):
 
     @llm_tool(name="arknights_query_alias")
     async def manage_alias(self, event: AstrMessageEvent, action: str, kind: str, alias: str, name: str = ""):
-        """管理干员/敌方单位的代号（别名）记录。用户查询时经常使用社区外号/谐音（如 夏游洁 指 予愿安洁莉），查询工具会自动先用别名记录解析输入。当查询工具返回「未找到」、而你能通过联网搜索或对话上下文确认用户指的是哪个干员/敌人时，用本工具登记代号，登记后后续查询可直接命中；也可查询已登记的别名或删除错误记录。
+        """管理干员/敌方单位的代号（别名）记录。用户查询时经常使用社区外号/谐音（如 夏游洁 指 予愿安洁莉），查询工具会自动先用别名记录解析输入。当查询工具返回「未找到」、而你能通过联网搜索或对话上下文确认用户指的是哪个干员/敌人时，用本工具登记代号，登记后后续查询可直接命中；也可查询、修改、删除已登记的别名。登记/修改都做精确校验：规范名（name）必须与游戏内名称完全一致，不做模糊匹配；代号（alias）本身不能是已存在的规范名（那会遮蔽真名），遇到这种错记录请用 remove 删除。register 对已存在的代号即覆盖修改，update 只改已存在的代号（不存在则拒绝，避免误建记录，要新增用 register）；remove 删除的默认代号不会被重新写回。
 
         Args:
-            action(string): 操作类型，可选 query(查询已登记的别名)/register(登记别名)/remove(删除别名)
+            action(string): 操作类型，可选 query(查询已登记代号)/register(新增或覆盖代号)/update(修改已登记代号的目标名)/remove(删除代号)
             kind(string): 类别，可选 operator(干员)/enemy(敌方单位)
             alias(string): 用户使用的代号，如 夏游洁
-            name(string): 对应的规范名称，仅 register 时必填，如 予愿安洁莉娜
+            name(string): 对应的规范名称，register/update 时必填，如 予愿安洁莉娜
         """
         action = (action or "").strip().lower()
         kind = (kind or "").strip().lower()
@@ -817,26 +817,47 @@ class ArknightsQuery(star.Star):
             yield "博士，明日方舟查询功能当前已关闭。"
             return
 
-        if action == "register":
+        if action in ("register", "update"):
+            verb = "登记" if action == "register" else "修改"
             if not name:
-                yield "登记代号需要提供规范名称（name），如：夏游洁 → 予愿安洁莉娜。"
+                yield f"{verb}代号需要提供规范名称（name），如：夏游洁 → 予愿安洁莉娜。"
                 return
-            # 校验并规范化为搜索命中的规范名，避免登记非规范名
-            canonical = None
-            if kind == "operator":
-                canonical = akq_query.search_operator(name)
-            elif kind == "enemy":
-                canonical = akq_query.search_enemy(name)
+            # 严格校验：规范名必须精确命中，绝不能用模糊匹配校验。旧逻辑用
+            # search_operator(name)（含相似度匹配），当时数据里还没有「克莱门莎」，
+            # 于是把「克莱门莎」相似匹配成了「莎草」并提示登记成功，留下
+            # 「克莱门莎 → 莎草」这条错记录，此后查克莱门莎永远返回莎草的材料。
+            canonical = akq_query.resolve_exact(kind, name)
             if not canonical:
                 yield (
-                    f"登记失败：{kind} 类中找不到与「{name}」对应的干员/敌人，"
-                    "请确认名称正确（可用联网搜索确认官方名称后再登记）。"
+                    f"{verb}失败：{kind} 类中找不到名为「{name}」的干员/敌人。"
+                    "规范名必须与游戏内名称完全一致（不做模糊匹配），"
+                    "请先联网确认官方名称后再登记。"
                 )
                 return
-            if akq_aliases.register(kind, alias, canonical):
-                yield f"已登记代号：{kind}「{alias}」→「{canonical}」。以后直接查询「{alias}」即可命中。"
+            shadow = akq_query.resolve_exact(kind, alias)
+            if shadow:
+                yield (
+                    f"{verb}失败：「{alias}」本身就是{kind}「{shadow}」的规范名，"
+                    "直接按这个名字查询即可；若代号表里已有这条错记录，请用 action=remove 删除。"
+                )
+                return
+            existed = alias in (akq_aliases.all_aliases(kind) or {})
+            if action == "register":
+                ok = akq_aliases.register(kind, alias, canonical)
+                done = (
+                    f"已更新代号：{kind}「{alias}」→「{canonical}」（原有记录被覆盖）。"
+                    if existed
+                    else f"已登记代号：{kind}「{alias}」→「{canonical}」。以后直接查询「{alias}」即可命中。"
+                )
             else:
+                ok = akq_aliases.update(kind, alias, canonical)
+                done = f"已修改代号：{kind}「{alias}」→「{canonical}」。"
+            if ok:
+                yield done
+            elif action == "register":
                 yield "登记失败：kind 需为 operator 或 enemy。"
+            else:
+                yield f"修改失败：没有已登记的代号「{alias}」，要新增请用 action=register。"
         elif action == "remove":
             if akq_aliases.remove(kind, alias):
                 yield f"已删除代号「{alias}」。"
@@ -852,10 +873,12 @@ class ArknightsQuery(star.Star):
                 if table.get(k):
                     lines.append(f"{k}：")
                     for a, n in table[k].items():
-                        lines.append(f"  {a} → {n}")
+                        # 目标不是当前数据里的规范名 → 多半是旧版模糊校验留下的错记录，提示清理
+                        dead = "  ← 目标已失效，建议 remove" if not akq_query.resolve_exact(k, n) else ""
+                        lines.append(f"  {a} → {n}{dead}")
             yield "\n".join(lines)
         else:
-            yield "未知操作，action 可选 query / register / remove。"
+            yield "未知操作，action 可选 query / register / update / remove。"
 
     # ------------------------------------------------------------------
     # 命令回退（需 @ 或唤醒词）
