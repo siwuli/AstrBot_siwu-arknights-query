@@ -118,10 +118,12 @@
                 this.$set(this, 'data', data)
             },
             description(text) {
-                return text
-                    .replace(/<@lv.ez>/g, '')
-                    .replace(/<@lv.fs>/g, '')
-                    .replace(/<@lv.item>/g, '')
+                // 关卡描述里的富文本标签有 <@lv.fs>/<@lv.item>/<@lv.muitem>/<@lv.rem>/<@act.xxx>/
+                // <@vecbreakv2.xxx> 等多种，逐个 replace 必然漏（漏掉的会以 </> 形式显示在图上），
+                // 统一按 <@…>/<$…>/</> 全部剥掉。
+                return (text || '')
+                    .replace(/<[@$][^>]*>/g, '')
+                    .replace(/<\/>/g, '')
                     .split('\\n').join('<br>')
             },
             displayDetailRewards(type) {

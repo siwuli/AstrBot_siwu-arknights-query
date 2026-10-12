@@ -35,8 +35,10 @@
                         <span class="mark">{{ equip.unlockEvolvePhase }}</span>
                         等级
                         <span class="mark">{{ equip.unlockLevel }}</span>
-                        信赖值
-                        <span class="mark">{{ parseInt(equip.unlockFavorPoint / 100) }}%</span>
+                        <template v-if="equip.unlockFavorPoint != null">
+                            信赖值
+                            <span class="mark">{{ Math.floor(equip.unlockFavorPoint / 100) }}%</span>
+                        </template>
                     </div>
                     <div v-for="(mission, index) in equip.missions">
                         {{ index + 2 }}. {{ mission.desc }}
@@ -82,9 +84,10 @@
                             <div class="sub-title"><span>升级材料消耗</span></div>
                             <div class="materiel-costs">
                                 <div class="materiel" :use="count(item.count)"
-                                     v-for="item in equip.itemCost[stage.equipLevel]">
-                                    <img :src="itemIconPath(item.info.material_icon)"
+                                     v-for="item in ((equip.itemCost || {})[stage.equipLevel] || [])">
+                                    <img v-if="item.info" :src="itemIconPath(item.info.material_icon)"
                                          :alt="item.info.material_name">
+                                    <span v-else class="mark">{{ item.id }}</span>
                                 </div>
                             </div>
                         </div>

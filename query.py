@@ -7,7 +7,7 @@
 import re
 
 from . import aliases as akq_aliases
-from .gamedata import GameData, get_skin_file
+from .gamedata import GameData, JsonData, get_skin_file
 from .utils import find_most_similar, integer, remove_punctuation, snake_case_to_pascal_case
 
 
@@ -71,9 +71,10 @@ async def get_operator_detail(operator_name: str):
     if modules:
         for module in modules:
             module_attr = {}
-            if module["detail"]:
-                attrs = module["detail"]["phases"][-1]["attributeBlackboard"]
-                for attr in attrs:
+            # 模组 detail 的 phases 在个别数据版本里可能为空，直接取 [-1] 会让整个干员详情查询报错
+            phases = (module.get("detail") or {}).get("phases") or []
+            if phases:
+                for attr in phases[-1].get("attributeBlackboard") or []:
                     module_attr[snake_case_to_pascal_case(attr["key"])] = integer(attr["value"])
             module_attrs.append({**module, "attrs": module_attr})
 
@@ -172,7 +173,20 @@ def get_operator_modules(operator_name: str):
     modules = operator.modules()
     if not modules:
         return []
+    item_table = JsonData.get_json_data("item_table").get("items") or {}
     for module in modules:
+        # 模板按 item.info.material_icon / material_name 取图标与名称，而 uniequip_table
+        # 的 itemCost 只有 {id, count, type}——必须在这里补 info，否则 Vue 渲染时读
+        # undefined.material_icon 抛错，整张模组卡会变成只有背景的空白图。
+        for entries in (module.get("itemCost") or {}).values():
+            for item in entries or []:
+                item_id = str(item.get("id"))
+                info = item_table.get(item_id) or {}
+                item["info"] = {
+                    "material_id": item_id,
+                    "material_name": info.get("name") or item_id,
+                    "material_icon": info.get("iconId") or item_id,
+                }
         attrs = []
         detail = module.get("detail") or {}
         phases = detail.get("phases") or []
@@ -185,6 +199,13 @@ def get_operator_modules(operator_name: str):
                     }
                 )
         module["_attrs"] = attrs
+        # v078 起解锁条件改用 unlockFavors(按模组等级)，unlockFavorPoint 已消失；
+        # unlockEvolvePhase 是 PHASE_2 这种枚举——直接渲染会显示「精英 PHASE_2 … 信赖值 NaN%」。
+        if module.get("unlockEvolvePhase"):
+            module["unlockEvolvePhase"] = str(module["unlockEvolvePhase"]).replace("PHASE_", "")
+        if module.get("unlockFavorPoint") is None:
+            favors = list((module.get("unlockFavors") or {}).values())
+            module["unlockFavorPoint"] = max(favors) if favors else None
     return modules
 
 

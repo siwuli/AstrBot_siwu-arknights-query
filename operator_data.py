@@ -191,8 +191,8 @@ class OperatorImpl:
 
         detail = {
             "operator_trait": trait.replace("\\n", "\n"),
-            "operator_usage": self.data["itemUsage"] or "",
-            "operator_quote": self.data["itemDesc"] or "",
+            "operator_usage": html_tag_format(self.data["itemUsage"] or ""),
+            "operator_quote": html_tag_format(self.data["itemDesc"] or ""),
             "operator_token": token["description"] if token else "",
             "max_level": "%s - %s" % (len(self.data["phases"]) - 1, max_phases["maxLevel"]),
         }
@@ -207,6 +207,20 @@ class OperatorImpl:
 
         def detail(item):
             data = character_table.get(item.id)
+
+            def clean_talents(talents):
+                """召唤物天赋描述同样带 <@ba.xxx>/<$ba.xxx> 富文本标签，剥掉后再给模板。"""
+                return [
+                    {
+                        **talent,
+                        "candidates": [
+                            {**cand, "description": html_tag_format(cand.get("description") or "")}
+                            for cand in (talent.get("candidates") or [])
+                        ],
+                    }
+                    for talent in (talents or [])
+                ]
+
             skills = {}
             for sk in data["skills"]:
                 if not sk["skillId"]:
@@ -229,11 +243,17 @@ class OperatorImpl:
                 "type": item.type,
                 "name": item.name,
                 "en_name": item.en_name,
-                "description": item.description,
+                "description": html_tag_format(item.description or ""),
                 "attr": item.attr,
-                "talents": data["talents"],
+                "talents": clean_talents(data["talents"]),
                 "skills": skills,
-                "data": data,
+                # 模板可能直接消费原始行（data），所以这里也给出净化后的副本，
+                # 避免 <@ba.xxx>/<$ba.xxx> 标签换了个字段又漏出去。
+                "data": {
+                    **data,
+                    "description": html_tag_format(data.get("description") or ""),
+                    "talents": clean_talents(data.get("talents")),
+                },
             }
 
         if self.data.get("displayTokenDict"):
@@ -255,7 +275,14 @@ class OperatorImpl:
         talents = []
         if self.data["talents"]:
             for item in self.data["talents"]:
-                max_item = item["candidates"][-1]
+                # 结城理（联动干员）的第 3 条天赋 candidates 为空，直接取 [-1] 会让整个
+                # 干员详情查询抛 TypeError（用户侧表现为「查询干员时出错了」）。
+                candidates = item.get("candidates") or []
+                if not candidates:
+                    continue
+                max_item = candidates[-1]
+                if not max_item.get("name"):
+                    continue
                 talents.append(
                     {
                         "talents_name": max_item["name"],
@@ -269,7 +296,7 @@ class OperatorImpl:
         if self.data["potentialRanks"]:
             for index, item in enumerate(self.data["potentialRanks"]):
                 potential.append(
-                    {"potential_desc": item["description"], "potential_rank": index + 1}
+                    {"potential_desc": html_tag_format(item.get("description") or ""), "potential_rank": index + 1}
                 )
         return potential
 
@@ -473,8 +500,30 @@ class OperatorImpl:
                 module["detail"] = equips_battle[m_id] if m_id in equips_battle else None
                 for mission in module["missionList"]:
                     module["missions"].append(mission_list[mission])
+                self.__format_module_detail(module["detail"])
                 modules.append(module)
         return modules
+
+    @staticmethod
+    def __format_module_detail(detail):
+        """模组「分支特性更新 / 天赋更新」描述里的 {key:format} 占位符与富文本标签。
+
+        游戏数据里写的是 `攻击附带<@ba.vup>{atk_scale_m:0%}</>攻击力的法术伤害`，数值在同级
+        blackboard（{key: atk_scale_m, value: 0.1}）。不处理的话卡片上会直接显示占位符原文，
+        且 `<@ba.vup>` 这类标签会被浏览器当成未知标签、连后面的文字一起吞掉。
+        复用本文件既有的 parse_template（替换占位符并着色）+ 标签剥离。
+        """
+        if not detail:
+            return
+        for phase in detail.get("phases") or []:
+            for part in phase.get("parts") or []:
+                for bundle_key in ("overrideTraitDataBundle", "addOrOverrideTalentDataBundle"):
+                    for candidate in ((part.get(bundle_key) or {}).get("candidates") or []):
+                        for field in ("additionalDescription", "overrideDescripton", "upgradeDescription"):
+                            if candidate.get(field):
+                                candidate[field] = parse_template(
+                                    candidate.get("blackboard") or [], candidate[field]
+                                )
 
     def __tags(self):
         tags = [self.classes, self.type]

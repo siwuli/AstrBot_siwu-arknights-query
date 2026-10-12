@@ -5,6 +5,13 @@
 无需任何修改即可工作：
     {astrbot_data}/resource/gamedata/            <- git clone 目标（version.txt/gamedata.zip/item/...）
     {astrbot_data}/resource/gamedata/gamedata/   <- gamedata.zip 解压后的 JSON（excel/ levels/）
+
+解压策略（本插件的自足更新逻辑，不依赖其它插件）：
+    每次启动都会 git pull 数据仓库；gamedata.zip 是否变化用**包内数据版本**
+    （excel/data_version.txt 的内容，如 "Stream://torappu-data/v078/rel78.0"）判断，
+    与已解压目录中的版本不一致就重新解压——而不是"目录是否存在"。
+    解压走临时目录 + 整体替换，并持有跨插件更新锁（{GAMEDATA_DIR}/.gamedata.update.lock），
+    与 siwu-arknights-fun / gacha / guess-operator 使用同一锁路径，互不踩踏。
 """
 
 import asyncio
@@ -14,9 +21,11 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.request
 import zipfile
 from collections import Counter
+from contextlib import contextmanager
 from urllib.parse import quote
 
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
@@ -33,6 +42,12 @@ GAMEDATA_DIR = os.path.join(get_astrbot_data_path(), "resource", "gamedata")
 JSON_DIR = os.path.join(GAMEDATA_DIR, "gamedata")
 # 材料价值缓存文件（一图流）
 MATERIAL_VALUE_CACHE = os.path.join(GAMEDATA_DIR, "material_value.json")
+
+# 跨插件数据更新锁：与 siwu-arknights-fun / gacha / guess-operator 约定同一路径。
+# 必须放在 GAMEDATA_DIR 下（而不是被整体替换的 JSON_DIR 内），否则会被解压覆盖掉。
+UPDATE_LOCK_DIR = os.path.join(GAMEDATA_DIR, ".gamedata.update.lock")
+# 数据版本标记：gamedata.zip 内该文件的内容即官方数据版本串
+ZIP_VERSION_MEMBER = "excel/data_version.txt"
 
 YITULIU_VALUE_API = "https://backend.yituliu.cn/item/v7/value"
 
@@ -171,17 +186,115 @@ def download_gamedata(repo: str = GIT_REPO_DEFAULT):
     logger.info(f"gamedata 仓库已就绪: {GAMEDATA_DIR}")
 
 
+@contextmanager
+def update_lock(timeout: float = 900.0, poll_interval: float = 1.0):
+    """跨插件数据更新锁（目录锁，跨进程生效）。
+
+    Yields:
+        bool: 是否成功拿到锁。拿不到时调用方应跳过本轮更新，沿用现有数据。
+    """
+    deadline = time.monotonic() + timeout
+    acquired = False
+    while True:
+        try:
+            os.makedirs(UPDATE_LOCK_DIR)
+            acquired = True
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(poll_interval)
+        except OSError as e:  # 权限/路径异常时不阻塞启动
+            logger.warning(f"创建数据更新锁失败，跳过互斥: {e}")
+            break
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                os.rmdir(UPDATE_LOCK_DIR)
+            except OSError:
+                pass
+
+
+def _zip_data_version() -> str:
+    """读取 gamedata.zip 内的官方数据版本串（读不到返回空串）。"""
+    zip_path = os.path.join(GAMEDATA_DIR, "gamedata.zip")
+    if not os.path.exists(zip_path):
+        return ""
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            names = set(zf.namelist())
+            for member in (ZIP_VERSION_MEMBER, f"gamedata/{ZIP_VERSION_MEMBER}"):
+                if member in names:
+                    return zf.read(member).decode("utf-8", "replace").strip()
+    except (OSError, zipfile.BadZipFile, KeyError) as e:
+        logger.warning(f"读取 {zip_path} 内的数据版本失败: {e}")
+    return ""
+
+
+def _extracted_data_version() -> str:
+    """读取已解压目录里的官方数据版本串（读不到返回空串）。"""
+    path = os.path.join(JSON_DIR, ZIP_VERSION_MEMBER)
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def need_extract() -> bool:
+    """是否需要（重新）解压 gamedata.zip。
+
+    判据是**数据版本**而不是目录是否存在：仓库里的 gamedata.zip 每次拉取都会更新，
+    但解压目录一直存在，只用 os.path.exists 判断会导致数据永远停在首次解压的版本。
+    """
+    if not os.path.exists(JSON_DIR):
+        return True
+    zip_version = _zip_data_version()
+    if not zip_version:
+        # 包内没有版本标记（老包/异常包）：保持现有数据，不做无谓的反复解压
+        return False
+    current = _extracted_data_version()
+    if zip_version != current:
+        logger.info(f"gamedata 数据版本变化: {current or '(未知)'} → {zip_version}，需要重新解压")
+        return True
+    return False
+
+
 def extract_gamedata_zip():
-    """解压 gamedata.zip 到 JSON_DIR（覆盖）。"""
+    """解压 gamedata.zip 到 JSON_DIR（覆盖）。
+
+    先解压到临时目录再整体替换，避免中途失败留下半截数据；
+    全程持有跨插件更新锁，避免与其它插件逐文件写入 excel/ 互相踩踏。
+    """
     zip_path = os.path.join(GAMEDATA_DIR, "gamedata.zip")
     if not os.path.exists(zip_path):
         raise FileNotFoundError(f"未找到 {zip_path}，请先拉取数据")
-    if os.path.exists(JSON_DIR):
-        shutil.rmtree(JSON_DIR)
-    os.makedirs(JSON_DIR, exist_ok=True)
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(JSON_DIR)
-    logger.info(f"gamedata.zip 已解压到 {JSON_DIR}")
+
+    with update_lock() as acquired:
+        if not acquired:
+            logger.warning("等待其它插件的数据更新锁超时，跳过本次解压（沿用现有数据）")
+            return
+        tmp_dir = JSON_DIR + ".extracting"
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir)
+        os.makedirs(tmp_dir, exist_ok=True)
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(tmp_dir)
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
+        if os.path.exists(JSON_DIR):
+            shutil.rmtree(JSON_DIR)
+        os.rename(tmp_dir, JSON_DIR)
+
+    logger.info(
+        f"gamedata.zip 已解压到 {JSON_DIR}（数据版本 {_extracted_data_version() or '未知'}）"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -481,8 +594,11 @@ def initialize_data(repo: str = GIT_REPO_DEFAULT, update: bool = True):
     if not os.path.exists(os.path.join(GAMEDATA_DIR, "version.txt")):
         raise RuntimeError("gamedata 数据不完整（缺少 version.txt）")
 
-    if not os.path.exists(JSON_DIR):
-        extract_gamedata_zip()
+    if need_extract():
+        try:
+            extract_gamedata_zip()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"gamedata.zip 解压失败，沿用现有数据: {e}")
 
     with open(os.path.join(GAMEDATA_DIR, "version.txt"), encoding="utf-8") as f:
         GameData.version = f.read().strip("\n") or "none"

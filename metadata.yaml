@@ -1,8 +1,8 @@
 name: arknights_query
 display_name: 明日方舟查询
-desc: "明日方舟游戏数据查询：干员详情/精英化专精材料/技能详情/召唤物/模组/皮肤/敌方单位/关卡地图/术语地形/公开招募。数据自动从 gitee 拉取，支持 Agent 主动调用并发送查询图片"
+desc: "v1.2.9 修复模组描述占位符与富文本标签未处理（卡片直显 {atk_scale_m:0%}、<@ba.vup> 会吞掉后文）、召唤物/潜能/简介/关卡条件同类标签残留，以及结城理天赋候选为空导致详情查询报错；明日方舟游戏数据查询：干员详情/精英化专精材料/技能详情/召唤物/模组/皮肤/敌方单位/关卡地图/术语地形/公开招募。数据自动从 gitee 拉取，支持 Agent 主动调用并发送查询图片。v1.2.8 修复模组查询返回空白图：模板读 item.info.material_icon，而 uniequip_table 的 itemCost 只有 {id,count,type}，Vue 渲染时读 undefined 抛错导致整张卡只剩背景（实测所有 5356 条材料条目均缺 info，386 个干员受影响）；现由数据层从 item_table 补 material_name/material_icon，模板加 v-if 防御。v1.2.7 修复数据永不更新：解压判据由「目录是否存在」改为「gamedata.zip 内数据版本 vs 已解压版本」——zip 每次拉取都会更新，但解压目录一直存在，旧逻辑导致数据永远停在首次解压的版本；解压改为临时目录+整体替换，并持有跨插件更新锁"
 help: "对机器人说「查一下干员 银灰」「棘刺专精材料」「银灰的模组」「W 的皮肤」「查询敌人 爱国者」「1-7 怎么打」「晕眩是什么意思」「帮我查公招」或发送公招界面截图，或让 Agent 直接调用工具"
-version: 1.2.6
+version: 1.2.9
 author: siwuli
 repo: https://github.com/siwuli/AstrBot_siwu-arknights-query
 astrbot_version: ">=4.0.0"
