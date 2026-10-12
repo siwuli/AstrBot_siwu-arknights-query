@@ -121,7 +121,13 @@ FORCE_QUERY_TOOL_PROMPT = """\
    文字类结果（术语、候选列表、活动列表）由工具返回给你，由你整理成自然语言回复用户；
    其中候选列表请列给用户并让其回复序号，再用原名称加 stage_index 重新调用 arknights_query_stage。
 6.【输出要求】干员/材料/敌方/单关卡查询，用户要的是资料图片，最终必须通过查询工具交付图片；
-   只回复文字总结而跳过工具都视为任务失败。\
+   只回复文字总结而跳过工具都视为任务失败。
+7.【用户纠正名称＝代号表有错，自己改】当用户指出上一次查询的对象不对（例如「我问的是克莱门莎，不是莎草」
+   「我要的是若叶睦，不是巡林者」），说明代号表里那条映射是错的，不要只是道歉重查，也不要等用户说
+   「删除/修改」：先用 arknights_query_alias（action=query）找到那条错记录，再自己判断——错记录指向的
+   是另一个真实存在的人（如 弱叶睦→巡林者）就用 action=update 改成正确映射；代号本身已经是规范名
+   （如 克莱门莎→莎草）就用 action=remove 删掉；改完重新查询出图，并简短告诉用户已修好这张表。
+   代号表存在插件配置里，用户也能在面板上自己改。\
 """
 
 
@@ -167,6 +173,8 @@ class ArknightsQuery(star.Star):
     def __init__(self, context, config: AstrBotConfig = None):
         super().__init__(context, config)
         self.config = config or {}
+        # 代号表存在插件配置里（面板可见可改），这里绑定配置对象并迁移旧版 aliases.json
+        akq_aliases.configure(self.config)
         self._init_task: asyncio.Task | None = None
         self._sxys_maps: dict | None = None
 
@@ -234,7 +242,7 @@ class ArknightsQuery(star.Star):
             f"第1步：调用 web_search_tavily 搜索「明日方舟 {label} {user_input}」，"
             f"确认其对应的官方名称（未确认前禁止用你猜测的名称直接查询）；\n"
             f"第2步：调用 {alias_tool} 登记该代号（action=register, kind={kind}, "
-            f"alias={user_input}, name=官方名称）；\n"
+            f"alias={user_input}, name=官方名称；代号表保存在插件配置里，用户也能在面板上自己增删改）；\n"
             f"第3步：调用 {query_tool} 查询（传入第1步确认的官方名称），工具会自动发送资料图片。"
         )
 
@@ -308,6 +316,11 @@ class ArknightsQuery(star.Star):
             yield self._alias_miss_message("operator", operator_name)
             return
 
+        # 输入不是规范名且确实来自代号表 → 在摘要里点明解析来源，用户与 Agent 才能发现代号表里的错记录
+        src_note = ""
+        if (operator_name or "").strip() != name and akq_aliases.resolve("operator", operator_name) == name:
+            src_note = f"（该名称来自代号表：「{operator_name}」→「{name}」）"
+
         query_type = (query_type or "info").strip().lower()
         query_type = {"modules": "module", "skins": "skin"}.get(query_type, query_type)
         try:
@@ -335,11 +348,11 @@ class ArknightsQuery(star.Star):
 
             if not data:
                 if query_type == "module":
-                    yield f"博士，干员「{name}」目前没有已解锁/可查询的模组。"
+                    yield f"博士，干员「{name}」{src_note}目前没有已解锁/可查询的模组。"
                 elif query_type == "skin":
-                    yield f"博士，干员「{name}」目前没有可用皮肤。"
+                    yield f"博士，干员「{name}」{src_note}目前没有可用皮肤。"
                 else:
-                    yield f"博士，查询干员「{name}」的资料失败了。"
+                    yield f"博士，查询干员「{name}」{src_note}的资料失败了。"
                 return
 
             width = int(self.config.get("akq_render_width", 1280))
@@ -355,20 +368,22 @@ class ArknightsQuery(star.Star):
                     m.get("uniEquipName", "未知模组") for m in data
                 )
                 yield (
-                    f"已向用户直接发送干员「{name}」的模组资料图片（共 {len(data)} 个模组：{module_names}），图片已展示在用户面前。"
+                    f"已向用户直接发送干员「{name}」{src_note}的模组资料图片（共 {len(data)} 个模组：{module_names}），图片已展示在用户面前。"
                     "你无法看到图片内容。请自然简短收尾；严禁转述图片中的属性数值、材料清单等内容，不要重复发送图片。"
                 )
             elif query_type == "skin":
                 skin_list = "、".join(f"{i + 1}.{s['skin_name']}" for i, s in enumerate(skins))
                 yield (
-                    f"已向用户直接发送干员「{name}」第 {chosen}/{len(skins)} 张皮肤「{data['data']['skin_name']}」的立绘图片，"
+                    f"已向用户直接发送干员「{name}」{src_note}第 {chosen}/{len(skins)} 张皮肤「{data['data']['skin_name']}」的立绘图片，"
                     f"该干员共有 {len(skins)} 张皮肤：{skin_list}。"
                     "你无法看到图片内容。请自然简短收尾；若用户想查看其他皮肤，可说明还有哪几张，"
                     "并可在用户要求后用 query_type=skin + skin_index 参数继续查询指定皮肤。"
                     "严禁转述图片细节或重复发送图片。"
                 )
             else:
-                yield _image_sent_text(f"干员「{name}」{QUERY_TYPE_HINT.get(query_type, '资料')}")
+                yield _image_sent_text(
+                    f"干员「{name}」{src_note}{QUERY_TYPE_HINT.get(query_type, '资料')}"
+                )
         except Exception as e:
             logger.exception(f"干员查询渲染失败: {e}")
             yield f"博士，查询干员「{name}」时出错了：{e}"
@@ -800,7 +815,16 @@ class ArknightsQuery(star.Star):
 
     @llm_tool(name="arknights_query_alias")
     async def manage_alias(self, event: AstrMessageEvent, action: str, kind: str, alias: str, name: str = ""):
-        """管理干员/敌方单位的代号（别名）记录。用户查询时经常使用社区外号/谐音（如 夏游洁 指 予愿安洁莉），查询工具会自动先用别名记录解析输入。当查询工具返回「未找到」、而你能通过联网搜索或对话上下文确认用户指的是哪个干员/敌人时，用本工具登记代号，登记后后续查询可直接命中；也可查询、修改、删除已登记的别名。登记/修改都做精确校验：规范名（name）必须与游戏内名称完全一致，不做模糊匹配；代号（alias）本身不能是已存在的规范名（那会遮蔽真名），遇到这种错记录请用 remove 删除。register 对已存在的代号即覆盖修改，update 只改已存在的代号（不存在则拒绝，避免误建记录，要新增用 register）；remove 删除的默认代号不会被重新写回。
+        """管理干员/敌方单位的代号（黑话/别名）表。用户查询时经常使用社区外号/谐音（如 夏游洁 指 予愿安洁莉），查询工具会自动先用代号表解析输入。
+
+        什么时候用：
+        ① 查询工具返回「未找到」引导时，联网确认官方名称后用 action=register 登记，登记后后续查询直接命中。
+        ② **用户纠正上一次的查询对象时**（例如「我问的是克莱门莎，不是莎草」「我要若叶睦，不是巡林者」）——这说明代号表里有错记录，而且错记录会继续污染之后所有查询。不要只是道歉重查、也不要等用户说「删除/修改」，自己判断：错记录指向的是另一个真实存在的人（如 弱叶睦→巡林者）就用 action=update 改成正确映射；代号本身已经是规范名（如 克莱门莎→莎草）就用 action=remove 删掉；改完重新查询出图，并简短告知用户已修好。
+        ③ 也可 action=query 列出全部记录（目标已失效的会标注）、action=remove 删除。
+
+        校验规则：规范名（name）必须与游戏内名称完全一致（精确匹配，不做模糊匹配）；代号（alias）本身不能是已存在的规范名——那只会遮蔽真名，遇到这种错记录请用 remove 删掉。register 对已存在的代号即覆盖修改；update 只改已存在的代号（不存在则拒绝，要新增用 register）。
+
+        代号表存在本插件的配置里（面板「插件配置 → 干员代号表 / 敌方单位代号表」），用户也能自己增删改；本工具的改动会立即写入配置，面板刷新即可看到。
 
         Args:
             action(string): 操作类型，可选 query(查询已登记代号)/register(新增或覆盖代号)/update(修改已登记代号的目标名)/remove(删除代号)
@@ -853,14 +877,14 @@ class ArknightsQuery(star.Star):
                 ok = akq_aliases.update(kind, alias, canonical)
                 done = f"已修改代号：{kind}「{alias}」→「{canonical}」。"
             if ok:
-                yield done
+                yield f"{done}已写入插件配置（面板「插件配置」中可查看/修改）。"
             elif action == "register":
                 yield "登记失败：kind 需为 operator 或 enemy。"
             else:
                 yield f"修改失败：没有已登记的代号「{alias}」，要新增请用 action=register。"
         elif action == "remove":
             if akq_aliases.remove(kind, alias):
-                yield f"已删除代号「{alias}」。"
+                yield f"已删除代号「{alias}」（已从插件配置中移除）。"
             else:
                 yield f"代号「{alias}」不存在，无需删除。"
         elif action == "query":
@@ -868,14 +892,18 @@ class ArknightsQuery(star.Star):
             if not any(table.values()):
                 yield "暂无已登记的代号记录。"
                 return
-            lines = []
+            lines = ["当前代号表（存于插件配置，用户也可在面板上直接编辑）："]
             for k in ("operator", "enemy"):
                 if table.get(k):
                     lines.append(f"{k}：")
                     for a, n in table[k].items():
-                        # 目标不是当前数据里的规范名 → 多半是旧版模糊校验留下的错记录，提示清理
-                        dead = "  ← 目标已失效，建议 remove" if not akq_query.resolve_exact(k, n) else ""
-                        lines.append(f"  {a} → {n}{dead}")
+                        if not akq_query.resolve_exact(k, n):
+                            note = "  ← 目标已失效，建议 remove"
+                        elif akq_query.resolve_exact(k, a):
+                            note = "  ← 代号与真名重名，不会生效，建议 remove"
+                        else:
+                            note = ""
+                        lines.append(f"  {a} → {n}{note}")
             yield "\n".join(lines)
         else:
             yield "未知操作，action 可选 query / register / update / remove。"
