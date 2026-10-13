@@ -15,6 +15,7 @@
         <div v-for="group in data.groups">
             <div>
                 <span class="tag" v-for="tag in group.tags">{{ tag }}</span>
+                <span class="guarantee">保底★{{ group.min_rarity }} / 最高★{{ group.max_rarity }}</span>
             </div>
             <div class="operator-list">
                 <div v-for="item in group.operators" class="operator">
