@@ -5,6 +5,11 @@
 - 不依赖 jieba 分词：标签匹配改为「特殊标签优先 + 普通标签最长优先包含匹配」；
 - 纯 Python，无框架依赖；数据源为 gamedata.py 的 GameData.operators
   （OperatorImpl，含 id/name/rarity/tags/is_recruit）。
+
+组合判定与上游一字不差（main.py:116-132 的 for...else）：候选干员按稀有度降序遍历，
+一旦遇到 3★/2★ 就 break，而 break 过的组合整组丢弃——只有「遍历走完都没 break」的组合
+才算锁定稀有干员、才画进图里（1★ 小车不触发 break）；因此单挂「输出」「群攻」「术师」
+「近战位」这类锁不住的组合不会出现在图上。
 """
 
 from itertools import combinations
@@ -203,10 +208,14 @@ def build_groups(tags: list, max_rarity: int):
                     max_r = rarity
                 lst.append(item)
             else:
-                # 按稀有度降序遍历，首个低星即可停止
+                # 按稀有度降序遍历，遇到 3★/2★ 说明这组标签锁不住稀有干员
                 break
-        if lst:
-            groups.append({"tags": comb, "max_rarity": max_r, "operators": lst})
+        else:
+            # for...else（上游原样）：只有遍历中没 break——即该组合不存在 3★/2★ 可选干员
+            # ——才算「可锁定稀有干员」，锁不住的组合整组不进图（如单挂「输出」「群攻」）。
+            # 1★ 小车不触发 break，所以「控场」这种只被 1★ 小车"污染"的稀有词条组合仍会保留。
+            if lst:
+                groups.append({"tags": comb, "max_rarity": max_r, "operators": lst})
 
     if not groups:
         return []

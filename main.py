@@ -612,6 +612,7 @@ class ArknightsQuery(star.Star):
             return
 
         try:
+            # build_groups 与上游一致：只返回「可锁定稀有干员」的组合（锁不住的整组已丢弃）
             groups = akq_recruit.build_groups(tags, max_rarity)
             if groups is None:
                 yield f"无法查询到标签【{'、'.join(tags)}】所拥有的稀有干员，请回复用户让 TA 确认标签是否正确。"
@@ -1120,6 +1121,7 @@ class ArknightsQuery(star.Star):
             return
 
         try:
+            # build_groups 与上游一致：只返回「可锁定稀有干员」的组合（锁不住的整组已丢弃）
             groups = akq_recruit.build_groups(tags, max_rarity)
             if not groups:
                 event.stop_event()
