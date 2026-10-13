@@ -3,9 +3,6 @@
 
 与 Amiya-Bot 原版差异：
 - 不依赖 jieba 分词：标签匹配改为「特殊标签优先 + 普通标签最长优先包含匹配」；
-- 组合按「保底」过滤：只保留公招池里最低也能出 4★ 的组合。原版对每个组合都列出
-  4★ 以上干员，于是单挂「输出」「群攻」「术师」「近战位」这类保底仅 1~3★ 的词条
-  也会被当成推荐展示（图上却看不到真正会出的 3★）；
 - 纯 Python，无框架依赖；数据源为 gamedata.py 的 GameData.operators
   （OperatorImpl，含 id/name/rarity/tags/is_recruit）。
 """
@@ -28,11 +25,6 @@ SPECIAL_WORDS = ["高级资深干员", "高级资深", "高资", "资深干员",
 
 # 口语缩写 → 标准标签
 ABBREV_TAGS = {"近战": "近战位", "远程": "远程位"}
-
-# 组合的「保底」：该组合在公招池里最低能匹配到的稀有度。
-# 保底低于 4★ 的组合（单挂「输出」「群攻」「术师」「近战位」等）在游戏里还会掉到
-# 3★/2★/1★，不构成「锁定稀有干员」，因此不作为推荐列出。
-MIN_USEFUL_RARITY = 4
 
 # 公招全部可能标签（含特殊标签「新手」）；用于视觉识别幻觉检测
 ALL_TAGS = [
@@ -180,13 +172,9 @@ def _all_match(tags_str: str, comb: list) -> bool:
 def build_groups(tags: list, max_rarity: int):
     """计算推荐组合列表。
 
-    每个组合都算出「保底」= 公招池里能匹配该组合全部标签的最低稀有度；只返回保底
-    达到 MIN_USEFUL_RARITY 的组合，并按保底从高到低排序（保底相同则标签多的、
-    最高稀有度高的在前）。
-
     Returns:
-        list[dict]: 组合列表（已排序，含 tags/min_rarity/max_rarity/operators）；
-        没有能锁定稀有干员的组合时返回 []；完全没有命中干员时返回 None。
+        list[dict]: 组合列表（已排序，含 tags/max_rarity/operators）；无结果时返回 []；
+        完全没有命中干员时返回 None。
     """
     result = find_operator_tags_by_tags(tags, max_rarity=max_rarity)
     if not result:
@@ -202,14 +190,12 @@ def build_groups(tags: list, max_rarity: int):
 
     groups = []
     for comb in [tags] if len(tags) == 1 else find_combinations(tags):
-        matched = [item for item in operators.values() if _all_match(item["operator_tags"], comb)]
-        if not matched:
-            continue
-        min_r = min(item["operator_rarity"] for item in matched)
         lst = []
         max_r = 0
-        for item in matched:
+        for item in operators.values():
             rarity = item["operator_rarity"]
+            if not _all_match(item["operator_tags"], comb):
+                continue
             if rarity == 6 and "高级资深干员" not in comb:
                 continue
             if rarity >= 4 or rarity == 1:
@@ -220,24 +206,21 @@ def build_groups(tags: list, max_rarity: int):
                 # 按稀有度降序遍历，首个低星即可停止
                 break
         if lst:
-            groups.append(
-                {"tags": comb, "min_rarity": min_r, "max_rarity": max_r, "operators": lst}
-            )
+            groups.append({"tags": comb, "max_rarity": max_r, "operators": lst})
 
-    useful = [g for g in groups if g["min_rarity"] >= MIN_USEFUL_RARITY]
-    return sorted(useful, key=lambda n: (-n["min_rarity"], -len(n["tags"]), -n["max_rarity"]))
+    if not groups:
+        return []
+
+    return sorted(groups, key=lambda n: (-len(n["tags"]), -n["max_rarity"]))
 
 
 def summarize(groups: list, tags: list, max_rarity: int) -> str:
     """生成给用户的推荐摘要（作为工具消息链中的文字部分，让"AI 说话"而不只是一张图）。
 
-    保持简洁：只说最优组合的保底/最高稀有度，详细内容看图。
+    保持简洁：只说最优组合与最高稀有度，详细内容看图。
     """
     if not groups:
-        return (
-            f"根据标签【{'、'.join(tags)}】没有能保证 4★ 及以上的组合"
-            "（这些标签在公招池里还会掉到 3★ 甚至 1★），建议再补几个标签试试～"
-        )
+        return f"根据标签【{'、'.join(tags)}】没找到能锁定稀有干员的组合，建议再补几个标签试试～"
 
     best = groups[0]
     ops = best["operators"]
@@ -246,6 +229,5 @@ def summarize(groups: list, tags: list, max_rarity: int) -> str:
         names += f" 等 {len(ops)} 位"
     return (
         f"博士，【{'、'.join(tags)}】最优组合是【{'、'.join(best['tags'])}】"
-        f"，保底 {'★' * best['min_rarity']}（最高可锁 {'★' * best['max_rarity']}）"
-        f"：{names}，详细见下图～"
+        f"，最高可锁 {'★' * best['max_rarity']}：{names}，详细见下图～"
     )
