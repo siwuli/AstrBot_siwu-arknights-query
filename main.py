@@ -102,9 +102,7 @@ FORCE_QUERY_TOOL_PROMPT = """\
    说"奎隆这关的地图"就传"奎隆"），不要自行联想、翻译、替换成其他名称
    （例如绝不要自作主张传成别的干员名/关卡代号）。
    仅当用户没有给出名称时（如「再查一下他的专精材料」），才用对话上下文推断。
-   委派给子代理（transfer_to_subagent_arknights）时同样必须把用户原话中的名称原样放进委派输入，
-   禁止把「芋圆安洁莉娜」「夏游洁」等谐音/社区称呼拆解改写成人名+皮肤名之类的猜测组合
-   ——工具内置代号表可自动解析，解析不了也会返回引导，轮不到你替用户改名。
+{{DELEGATION_NOTE}}
 3.【禁止反问关卡代号】用户询问关卡/地图时，即使你认为该名称可能对应多个关卡
    （如肉鸽结局、多结局BOSS、同名活动关卡），也必须【立即调用 arknights_query_stage 并原样传参】，
    由工具返回候选列表或"未找到"引导；绝不允许先回复"请告诉我具体关卡代号"之类的反问再查。
@@ -128,6 +126,16 @@ FORCE_QUERY_TOOL_PROMPT = """\
    是另一个真实存在的人（如 弱叶睦→巡林者）就用 action=update 改成正确映射；代号本身已经是规范名
    （如 克莱门莎→莎草）就用 action=remove 删掉；改完重新查询出图，并简短告诉用户已修好这张表。
    代号表存在插件配置里，用户也能在面板上自己改。\
+"""
+
+
+# 子代理转交工具：框架只在部分会话注入，缺了就得自己补——
+# 提示词里提到它、工具列表里却没有，模型只能把调用写成正文发进群。
+DELEGATION_TOOL = "transfer_to_subagent_arknights"
+DELEGATION_NOTE = """\
+    委派给子代理（transfer_to_subagent_arknights）时同样必须把用户原话中的名称原样放进委派输入，
+    禁止把「芋圆安洁莉娜」「夏游洁」等谐音/社区称呼拆解改写成人名+皮肤名之类的猜测组合
+    ——工具内置代号表可自动解析，解析不了也会返回引导，轮不到你替用户改名。
 """
 
 
@@ -249,6 +257,30 @@ class ArknightsQuery(star.Star):
     # ------------------------------------------------------------------
     # Agent 工具
     # ------------------------------------------------------------------
+    def _ensure_delegation_tool(self, req: ProviderRequest) -> bool:
+        """确保本请求里有子代理转交工具；框架在群聊等路径不会注入，缺了就补上。"""
+        if req.func_tool is None:
+            return False
+        try:
+            if DELEGATION_TOOL in req.func_tool.names():
+                return True
+        except Exception:
+            pass
+        orch = getattr(self.context, "subagent_orchestrator", None)
+        for tool in list(getattr(orch, "handoffs", None) or []):
+            if getattr(tool, "name", "") != DELEGATION_TOOL:
+                continue
+            try:
+                req.func_tool.add_tool(tool)
+                logger.info(
+                    "[arknights_query] 已为本次请求补上子代理转交工具 %s", DELEGATION_TOOL
+                )
+                return True
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[arknights_query] 补子代理转交工具失败: %s", e)
+                return False
+        return False
+
     @filter.on_llm_request()
     async def force_agent_query_tool(
         self, event: AstrMessageEvent, req: ProviderRequest
@@ -257,8 +289,8 @@ class ArknightsQuery(star.Star):
 
         部分模型（如 mimo）收到查询请求时倾向于只回复文字、或收到"未找到"引导后
         跳过工具调用。此钩子在 LLM 请求发出前拦截：
-        1) 在系统提示词末尾追加强制指令（位于安全提示词之后，优先级更高）；
-        2) 确保三个查询工具在本请求的工具列表中。
+        1) 确保子代理转交工具与查询工具都在本次请求的工具列表中；
+        2) 在系统提示词末尾追加强制指令（位于安全提示词之后，优先级更高）。
         """
         if not bool(self.config.get("akq_enabled", True)):
             return
@@ -266,10 +298,8 @@ class ArknightsQuery(star.Star):
         if not QUERY_INTENT_RE.search(text):
             return
 
-        # 1) 系统提示词追加强制指令
-        req.system_prompt = f"{req.system_prompt}\n\n{FORCE_QUERY_TOOL_PROMPT}"
-
-        # 2) 确保查询工具在本次请求中可用
+        # 1) 确保本次请求的工具可用：子代理转交工具 + 六个查询工具
+        delegation = self._ensure_delegation_tool(req)
         if req.func_tool is not None:
             manager = self.context.get_llm_tool_manager()
             for tool_name in (
@@ -283,6 +313,12 @@ class ArknightsQuery(star.Star):
                 tool = manager.get_func(tool_name)
                 if tool:
                     req.func_tool.add_tool(tool)
+
+        # 2) 系统提示词追加强制指令（转交工具不可用时不提转交，避免空头承诺）
+        prompt = FORCE_QUERY_TOOL_PROMPT.replace(
+            "{{DELEGATION_NOTE}}", DELEGATION_NOTE if delegation else ""
+        )
+        req.system_prompt = f"{req.system_prompt}\n\n{prompt}"
 
         # 3) 查询场景移除内置发消息工具：资料图片由查询工具自动直发，
         #    若 Agent 再调 send_message_to_user 会与已直发的图片/最终回复重复，作为硬性兜底。

@@ -1,8 +1,8 @@
-name: arknights_query
+﻿name: arknights_query
 display_name: 明日方舟查询
 desc: "明日方舟游戏数据查询：干员/材料/技能/模组/皮肤、敌人、关卡、术语与公开招募，自动拉取数据，支持 Agent 调用出图"
 help: "对机器人说「查一下干员 银灰」「棘刺专精材料」「银灰的模组」「W 的皮肤」「查询敌人 爱国者」「1-7 怎么打」「晕眩是什么意思」「帮我查公招」或发送公招界面截图，或让 Agent 直接调用工具"
-version: 1.2.14
+version: 1.2.15
 author: siwuli
 repo: https://github.com/siwuli/AstrBot_siwu-arknights-query
 astrbot_version: ">=4.0.0"
